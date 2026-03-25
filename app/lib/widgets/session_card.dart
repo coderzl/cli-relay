@@ -45,7 +45,7 @@ class SessionCard extends StatelessWidget {
                   child: Icon(
                     hasApproval
                         ? CupertinoIcons.exclamationmark_shield_fill
-                        : CupertinoIcons.terminal_fill,
+                        : Icons.terminal,
                     size: 22,
                     color: hasApproval ? AppTheme.orange : theme.colorScheme.primary,
                   ),

@@ -179,7 +179,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               Divider(height: 0.5, indent: 52, color: theme.dividerTheme.color),
               _infoTile(CupertinoIcons.arrow_2_circlepath, 'Auto-reconnects on disconnect'),
               Divider(height: 0.5, indent: 52, color: theme.dividerTheme.color),
-              _infoTile(CupertinoIcons.terminal, 'Supports zsh alias & custom commands'),
+              _infoTile(Icons.terminal, 'Supports zsh alias & custom commands'),
             ],
           ),
           const SizedBox(height: 40),

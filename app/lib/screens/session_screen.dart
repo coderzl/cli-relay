@@ -65,13 +65,16 @@ class _SessionScreenState extends State<SessionScreen> {
   }
 
   void _copyAllOutput() {
-    // 安全获取 terminal buffer 文本
+    // xterm 4.0: 通过 buffer 获取文本
     try {
-      final content = _terminal.export();
-      Clipboard.setData(ClipboardData(text: content));
+      final buffer = _terminal.buffer;
+      final lines = <String>[];
+      for (int i = 0; i < buffer.lines.length; i++) {
+        lines.add(buffer.lines[i].toString());
+      }
+      Clipboard.setData(ClipboardData(text: lines.join('\n')));
     } catch (_) {
-      // fallback: 部分 xterm 版本无 export()
-      Clipboard.setData(const ClipboardData(text: '[Copy not supported in this terminal version]'));
+      Clipboard.setData(const ClipboardData(text: '[Copy failed]'));
     }
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
@@ -170,7 +173,7 @@ class _SessionScreenState extends State<SessionScreen> {
                 ),
                 padding: const EdgeInsets.all(8),
                 autofocus: false,
-                onKeyEvent: (key) {
+                onKeyEvent: (node, key) {
                   if (key is! KeyDownEvent) return KeyEventResult.ignored;
                   final char = key.character;
                   if (char != null) {
