@@ -33,14 +33,16 @@ class SessionInfo {
 }
 
 class ApprovalRequest {
+  // [F4] 单调递增计数器，不依赖时钟精度
+  static int _counter = 0;
+  final int seq;
   final String sessionId;
   final String tool;
   final String description;
-  final DateTime time;
 
   ApprovalRequest({
     required this.sessionId,
     required this.tool,
     required this.description,
-  }) : time = DateTime.now();
+  }) : seq = ++_counter;
 }

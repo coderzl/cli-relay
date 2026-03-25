@@ -31,13 +31,23 @@ else:
     flags = fcntl.fcntl(sys.stdin.fileno(), fcntl.F_GETFL)
     fcntl.fcntl(sys.stdin.fileno(), fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
-    # [M7] SIGTERM 转发给子进程
+    # [M7+B4] SIGTERM 转发，非阻塞等待
     def on_term(sig, frame):
         try:
             os.kill(pid, signal.SIGTERM)
-            time.sleep(0.5)
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
+            # 非阻塞等待子进程退出
+            for _ in range(10):
+                result = os.waitpid(pid, os.WNOHANG)
+                if result[0] != 0:
+                    break
+                time.sleep(0.05)
+            else:
+                os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, ChildProcessError):
+            pass
+        try:
+            os.close(fd)
+        except OSError:
             pass
         sys.exit(0)
     signal.signal(signal.SIGTERM, on_term)
@@ -84,9 +94,15 @@ else:
                         os.write(sys.stdout.fileno(), data)
                 except (OSError, IOError):
                     pass
+                try: os.close(fd)
+                except OSError: pass
                 sys.exit(os.WEXITSTATUS(result[1]) if os.WIFEXITED(result[1]) else 1)
     except KeyboardInterrupt:
         os.kill(pid, signal.SIGTERM)
+        try: os.close(fd)
+        except OSError: pass
         sys.exit(0)
     except OSError:
+        try: os.close(fd)
+        except OSError: pass
         sys.exit(0)

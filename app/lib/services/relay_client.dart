@@ -28,7 +28,6 @@ class RelayClient extends ChangeNotifier {
 
   bool get connected => _visibleConnected;
 
-  VoidCallback? onApprovalReceived;
   void Function(String sid)? onSessionStarted;
 
   // ── 连接 ──────────────────────────────────────────────
@@ -285,7 +284,7 @@ class RelayClient extends ChangeNotifier {
             tool: msg['tool'] as String? ?? 'tool',
             description: msg['desc'] as String? ?? '',
           );
-          onApprovalReceived?.call();
+
           break;
 
         case 'ended':
@@ -293,9 +292,9 @@ class RelayClient extends ChangeNotifier {
           if (sid.isEmpty) break;
           sessions.remove(sid);
           approvals.remove(sid);
-          if (terminals.containsKey(sid)) {
+          if (terminals.containsKey(sid) && !endedIds.contains(sid)) { // [F1] 防重复
             endedIds.add(sid);
-            _capEndedHistory(); // [FH3]
+            _capEndedHistory();
           }
           saveSessionsLocally();
           break;
@@ -344,6 +343,11 @@ class RelayClient extends ChangeNotifier {
     _reconnect?.cancel();
     _disconnectDebounce?.cancel();
     disconnect();
+    // [F5] dispose 所有 Terminal 对象
+    for (final t in terminals.values) {
+      t.dispose();
+    }
+    terminals.clear();
     super.dispose();
   }
 }

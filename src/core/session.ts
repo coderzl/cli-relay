@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
-import { existsSync } from 'node:fs'
-import { randomUUID, timingSafeEqual } from 'node:crypto'
+import { existsSync, realpathSync } from 'node:fs'
+import { randomUUID, timingSafeEqual, createHmac } from 'node:crypto'
 import { resolve } from 'node:path'
 import { spawn, ChildProcess } from 'node:child_process'
 import stripAnsi from 'strip-ansi'
@@ -54,8 +54,11 @@ function shellEscape(s: string): string {
 // ── 常量比较（防时序攻击）───────────────────────────────
 
 export function safeTokenEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false
-  return timingSafeEqual(Buffer.from(a), Buffer.from(b))
+  // HMAC 使长度一致，防止长度泄露
+  const key = 'cli-relay-token-compare'
+  const ha = createHmac('sha256', key).update(a).digest()
+  const hb = createHmac('sha256', key).update(b).digest()
+  return timingSafeEqual(ha, hb)
 }
 
 // ── 审批检测 ─────────────────────────────────────────────
@@ -116,9 +119,14 @@ export class SessionManager extends EventEmitter {
       throw new Error(`Working directory does not exist: ${config.workDir}`)
     }
 
-    // [H5] workDir 路径限制 — 必须在 WORK_DIR 或 HOME 下
-    const allowedBase = resolve(process.env.WORK_DIR ?? process.env.HOME ?? '/')
-    const resolvedDir = resolve(config.workDir)
+    // [H5+B1] workDir 路径限制 — realpathSync 防 symlink 绕过
+    const allowedBase = realpathSync(resolve(process.env.WORK_DIR ?? process.env.HOME ?? '/'))
+    let resolvedDir: string
+    try {
+      resolvedDir = realpathSync(config.workDir)
+    } catch {
+      throw new Error(`workDir not accessible: ${config.workDir}`)
+    }
     if (!resolvedDir.startsWith(allowedBase) && resolvedDir !== allowedBase) {
       throw new Error(`workDir must be under ${allowedBase}, got: ${resolvedDir}`)
     }

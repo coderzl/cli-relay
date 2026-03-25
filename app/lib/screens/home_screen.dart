@@ -68,7 +68,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final url = prefs.getString('server_url');
     final token = prefs.getString('auth_token');
     if (url != null && token != null && url.isNotEmpty && mounted) {
-      context.read<RelayClient>().connect(url, token);
+      _relay.connect(url, token); // [F2] 用缓存引用，避免 async gap 后 context.read
     }
   }
 

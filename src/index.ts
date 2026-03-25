@@ -24,13 +24,15 @@ try {
   console.warn(`[discord] Failed to start: ${(e as Error).message}`)
 }
 
-// [L4] 优雅退出：关闭 WS server + Discord + 所有会话
-process.on('SIGINT', () => {
+// [L4+B9] 优雅退出：SIGINT + SIGTERM
+const shutdown = () => {
   console.log('\nShutting down...')
   sessions.killAll()
   wss.close()
   discordClient?.destroy()
   setTimeout(() => process.exit(0), 500)
-})
+}
+process.on('SIGINT', shutdown)
+process.on('SIGTERM', shutdown)
 
 console.log('cli-relay ready.')

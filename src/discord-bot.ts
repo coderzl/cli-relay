@@ -389,7 +389,13 @@ export async function startDiscordBot(sessions: SessionManager) {
       })
 
       const editor = new MessageEditor(thread)
-      const session = sessions.start({ agent, prompt, workDir, yolo, customCmd })
+      let session: ReturnType<typeof sessions.start>
+      try {
+        session = sessions.start({ agent, prompt, workDir, yolo, customCmd })
+      } catch (e) {
+        await thread.send(`Error: ${(e as Error).message}`)
+        return
+      }
       live.set(session.id, { threadId: thread.id, editor })
 
       const infoEmbed = new EmbedBuilder()
