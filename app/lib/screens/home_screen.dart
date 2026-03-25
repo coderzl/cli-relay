@@ -38,7 +38,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         Navigator.push(
           context,
           CupertinoPageRoute(builder: (_) => SessionScreen(sessionId: sid)),
-        ).whenComplete(() => _navigating = false); // [FH16] whenComplete 而非 then
+        ).whenComplete(() => _navigating = false);
+      }
+    };
+
+    _relay.onError = (msg) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $msg'), behavior: SnackBarBehavior.floating),
+        );
       }
     };
 
@@ -47,7 +55,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
-    _relay.onSessionStarted = null; // [FH15] 用缓存引用
+    _relay.onSessionStarted = null;
+    _relay.onError = null;
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }

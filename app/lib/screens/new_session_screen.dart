@@ -16,7 +16,7 @@ class _NewSessionScreenState extends State<NewSessionScreen> {
   final _agents = ['claude', 'codex', 'qoder', 'custom'];
   int _agentIdx = 0;
   final _promptCtrl = TextEditingController();
-  final _workDirCtrl = TextEditingController(text: '/Users');
+  final _workDirCtrl = TextEditingController(text: '/Volumes/D/zhige');
   final _cmdCtrl = TextEditingController();
   bool _yolo = false;
 

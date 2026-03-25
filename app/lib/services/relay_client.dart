@@ -29,6 +29,7 @@ class RelayClient extends ChangeNotifier {
   bool get connected => _visibleConnected;
 
   void Function(String sid)? onSessionStarted;
+  void Function(String msg)? onError; // 服务端错误回调
 
   // ── 连接 ──────────────────────────────────────────────
 
@@ -327,7 +328,9 @@ class RelayClient extends ChangeNotifier {
           break;
 
         case 'error':
-          debugPrint('Server: ${msg['msg']}');
+          final errMsg = msg['msg'] as String? ?? 'Unknown error';
+          debugPrint('Server error: $errMsg');
+          onError?.call(errMsg);
           break;
       }
 
