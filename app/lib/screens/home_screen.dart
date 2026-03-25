@@ -19,21 +19,30 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
+  bool _navigating = false; // 防止重复跳转
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _autoConnect();
+
+    final relay = context.read<RelayClient>();
+
+    // 加载本地持久化的 session
+    relay.loadSessionsLocally();
 
     // 新 session 创建时自动跳转到对话页
-    context.read<RelayClient>().onSessionStarted = (sid) {
-      if (mounted) {
+    relay.onSessionStarted = (sid) {
+      if (mounted && !_navigating) {
+        _navigating = true;
         Navigator.push(
           context,
           CupertinoPageRoute(builder: (_) => SessionScreen(sessionId: sid)),
-        );
+        ).then((_) => _navigating = false);
       }
     };
+
+    _autoConnect();
   }
 
   @override
@@ -43,7 +52,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  // App 从后台恢复 → 自动重连 + 刷新
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
@@ -77,18 +85,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         title: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Container(
+            // 连接指示灯：绿=连接，橙=重连中（不用红色减少焦虑）
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 300),
               width: 8, height: 8,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 color: relay.connected
                     ? const Color(0xFF34C759)
-                    : const Color(0xFFFF3B30),
+                    : const Color(0xFFFF9500),
                 boxShadow: [
                   BoxShadow(
                     color: (relay.connected
                             ? const Color(0xFF34C759)
-                            : const Color(0xFFFF3B30))
+                            : const Color(0xFFFF9500))
                         .withAlpha(100),
                     blurRadius: 6,
                   ),

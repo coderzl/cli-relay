@@ -26,6 +26,10 @@ class _SessionScreenState extends State<SessionScreen> {
   void initState() {
     super.initState();
     _terminal = context.read<RelayClient>().terminalFor(widget.sessionId);
+    // 进入页面后自动聚焦输入框
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _inputFocus.requestFocus();
+    });
   }
 
   @override
@@ -121,12 +125,16 @@ class _SessionScreenState extends State<SessionScreen> {
                   width: 6, height: 6,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    color: isAlive ? AppTheme.green : Colors.grey,
+                    color: !relay.connected
+                        ? AppTheme.orange // 断线 = 橙色（非红色，减少焦虑）
+                        : isAlive ? AppTheme.green : Colors.grey,
                   ),
                 ),
                 const SizedBox(width: 6),
                 Text(
-                  isAlive ? widget.sessionId : 'Ended',
+                  !relay.connected
+                      ? 'Reconnecting...'
+                      : isAlive ? widget.sessionId : 'Ended',
                   style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
                 ),
               ],
