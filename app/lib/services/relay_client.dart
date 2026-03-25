@@ -198,9 +198,7 @@ class RelayClient extends ChangeNotifier {
   Future<void> saveSessionsLocally() async {
     final prefs = await SharedPreferences.getInstance();
     final data = sessions.values
-        .map((s) => {
-          return '${s.id}|${s.agent}|${s.workDir}|${s.yolo}|${s.startedAt}';
-        })
+        .map((s) => '${s.id}|${s.agent}|${s.workDir}|${s.yolo}|${s.startedAt}')
         .toList();
     await prefs.setStringList(_sessionStorageKey, data);
   }
