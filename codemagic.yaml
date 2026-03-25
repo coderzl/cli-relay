@@ -12,9 +12,21 @@ workflows:
     scripts:
       - name: Generate Android project files
         script: |
-          # Flutter 项目手写的，需要生成 android/ 目录
           flutter create --platforms android --org com.coderzl .
           flutter pub get
+
+      - name: Patch Android config for network access
+        script: |
+          # 确保 INTERNET 权限 + 允许明文流量
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          # 添加 usesCleartextTraffic 和 INTERNET 权限
+          sed -i '' 's|<application|<application android:usesCleartextTraffic="true"|' "$MANIFEST"
+          # 确保有 INTERNET 权限（flutter create 默认有，但 release 可能 strip）
+          if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
+            sed -i '' 's|</manifest>|<uses-permission android:name="android.permission.INTERNET"/>\n</manifest>|' "$MANIFEST"
+          fi
+          echo "=== Patched AndroidManifest.xml ==="
+          cat "$MANIFEST"
 
       - name: Build APK
         script: flutter build apk --release
