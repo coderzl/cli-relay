@@ -24,10 +24,21 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _autoConnect();
+
+    // 新 session 创建时自动跳转到对话页
+    context.read<RelayClient>().onSessionStarted = (sid) {
+      if (mounted) {
+        Navigator.push(
+          context,
+          CupertinoPageRoute(builder: (_) => SessionScreen(sessionId: sid)),
+        );
+      }
+    };
   }
 
   @override
   void dispose() {
+    context.read<RelayClient>().onSessionStarted = null;
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }

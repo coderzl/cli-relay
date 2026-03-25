@@ -160,46 +160,23 @@ class _SessionScreenState extends State<SessionScreen> {
         children: [
           // ── 终端视图 (真终端渲染) ─────────────────────
           Expanded(
-            child: Container(
-              color: isDark ? Colors.black : const Color(0xFF1A1A2E),
-              padding: EdgeInsets.only(
-                bottom: !isAlive ? MediaQuery.of(context).viewPadding.bottom : 0,
-              ),
-              child: TerminalView(
-                _terminal,
-                textStyle: const TerminalStyle(
-                  fontSize: 13,
-                  fontFamily: 'monospace',
+            child: AbsorbPointer(
+              // 禁止终端区域的点击/触摸，输入只通过底部输入框
+              child: Container(
+                color: isDark ? Colors.black : const Color(0xFF1A1A2E),
+                padding: EdgeInsets.only(
+                  bottom: !isAlive ? MediaQuery.of(context).viewPadding.bottom : 0,
                 ),
-                padding: const EdgeInsets.all(8),
-                autofocus: false,
-                onKeyEvent: (node, key) {
-                  if (key is! KeyDownEvent) return KeyEventResult.ignored;
-                  final char = key.character;
-                  if (char != null) {
-                    relay.sendInput(widget.sessionId, char);
-                    return KeyEventResult.handled;
-                  }
-                  // 特殊键映射
-                  final logical = key.logicalKey;
-                  if (logical == LogicalKeyboardKey.enter) {
-                    relay.sendInput(widget.sessionId, '\r');
-                    return KeyEventResult.handled;
-                  }
-                  if (logical == LogicalKeyboardKey.backspace) {
-                    relay.sendInput(widget.sessionId, '\x7f');
-                    return KeyEventResult.handled;
-                  }
-                  if (logical == LogicalKeyboardKey.tab) {
-                    relay.sendInput(widget.sessionId, '\t');
-                    return KeyEventResult.handled;
-                  }
-                  if (logical == LogicalKeyboardKey.escape) {
-                    relay.sendInput(widget.sessionId, '\x1b');
-                    return KeyEventResult.handled;
-                  }
-                  return KeyEventResult.ignored;
-                },
+                child: TerminalView(
+                  _terminal,
+                  textStyle: const TerminalStyle(
+                    fontSize: 13,
+                    fontFamily: 'monospace',
+                  ),
+                  padding: const EdgeInsets.all(8),
+                  autofocus: false,
+                  onKeyEvent: (node, key) => KeyEventResult.ignored,
+                ),
               ),
             ),
           ),

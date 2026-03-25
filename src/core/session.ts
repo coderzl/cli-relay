@@ -28,9 +28,14 @@ function buildShellCmd(c: SessionConfig): string {
     qoder: '--yolo',
     custom: '--dangerously-skip-permissions',
   }
+  // claude: 加 --permission-mode bypassPermissions 跳过 trust 弹窗
+  const extraFlags: Record<string, string> = {
+    claude: '--permission-mode bypassPermissions',
+  }
   const yoloFlag = c.yolo ? ` ${yoloFlags[c.agent] ?? ''}` : ''
+  const extra = extraFlags[c.agent] ?? ''
   const prompt = c.prompt.trim() ? ` ${shellEscape(c.prompt)}` : ''
-  return `${bin}${yoloFlag}${prompt}`
+  return `${bin}${yoloFlag}${extra ? ' ' + extra : ''}${prompt}`
 }
 
 function shellEscape(s: string): string {
@@ -161,7 +166,23 @@ export class SessionManager extends EventEmitter {
       if (textTimer) { clearTimeout(textTimer); textTimer = null }
     }
 
+    // 自动检测并确认 trust 提示
+    let trustConfirmed = false
+    let allOutput = ''
+
     const onData = (data: Buffer) => {
+      // 检测 trust 提示并自动确认
+      if (!trustConfirmed) {
+        allOutput += data.toString('utf-8')
+        // 检测 codex/claude 的 trust 提示关键词
+        if (/trust.*directory|Yes,\s*continue|Press enter to continue/i.test(allOutput)) {
+          trustConfirmed = true
+          console.log(`[session] ${id} auto-confirming trust`)
+          // 发送 "1\n" 选择 "Yes, continue"，再发回车确认
+          setTimeout(() => proc.stdin?.write('1\n'), 500)
+        }
+      }
+
       // Raw path
       rawBuf = Buffer.concat([rawBuf, data])
       if (rawBuf.length > 4096) {
@@ -232,6 +253,7 @@ export class SessionManager extends EventEmitter {
 
     this.sessions.set(id, session)
     this.emit('started', id, session.info())
+
     return session
   }
 

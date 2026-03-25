@@ -24,6 +24,7 @@ class RelayClient extends ChangeNotifier {
   bool get connected => _connected;
 
   VoidCallback? onApprovalReceived;
+  void Function(String sid)? onSessionStarted; // 新 session 启动时回调
 
   // ── 连接 ──────────────────────────────────────────────
 
@@ -183,6 +184,7 @@ class RelayClient extends ChangeNotifier {
             startedAt: DateTime.now().millisecondsSinceEpoch,
           );
           terminalFor(sid);
+          onSessionStarted?.call(sid);
           break;
 
         case 'data':
