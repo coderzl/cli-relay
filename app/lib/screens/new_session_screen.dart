@@ -31,12 +31,26 @@ class _NewSessionScreenState extends State<NewSessionScreen> {
   bool get _isCustom => _agents[_agentIdx] == 'custom';
 
   void _start() {
-    HapticFeedback.mediumImpact();
+    // [FM20] 校验必填字段
+    final workDir = _workDirCtrl.text.trim();
+    if (workDir.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Working directory is required'), behavior: SnackBarBehavior.floating),
+      );
+      return;
+    }
+    if (_isCustom && _cmdCtrl.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Custom command is required'), behavior: SnackBarBehavior.floating),
+      );
+      return;
+    }
 
+    HapticFeedback.mediumImpact();
     context.read<RelayClient>().startSession(
           agent: _agents[_agentIdx],
           prompt: _promptCtrl.text.trim(),
-          workDir: _workDirCtrl.text.trim(),
+          workDir: workDir,
           yolo: _yolo,
           customCmd: _isCustom ? _cmdCtrl.text.trim() : null,
         );

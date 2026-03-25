@@ -20,7 +20,8 @@ class _SessionScreenState extends State<SessionScreen> {
   final _inputFocus = FocusNode();
   late Terminal _terminal;
   bool _approvalSheetShown = false;
-  String? _lastApprovalTool; // 追踪已展示的审批，防止重复弹出
+  // [FC9] 用时间戳去重，而非 tool 名（同一 tool 可多次请求审批）
+  DateTime? _lastApprovalTime;
 
   @override
   void initState() {
@@ -47,11 +48,12 @@ class _SessionScreenState extends State<SessionScreen> {
   }
 
   void _showApproval(RelayClient relay) {
+    if (!mounted) return; // [FH10]
     final approval = relay.approvals[widget.sessionId];
     if (approval == null || _approvalSheetShown) return;
 
     _approvalSheetShown = true;
-    _lastApprovalTool = approval.tool;
+    _lastApprovalTime = approval.time;
     HapticFeedback.heavyImpact();
 
     showModalBottomSheet(
@@ -98,14 +100,14 @@ class _SessionScreenState extends State<SessionScreen> {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
 
-    // 有新审批时自动弹出（防止重复弹）
-    if (approval != null && !_approvalSheetShown && approval.tool != _lastApprovalTool) {
+    // [FC9] 有新审批时自动弹出（用时间戳去重，同一 tool 可多次审批）
+    if (approval != null && !_approvalSheetShown && approval.time != _lastApprovalTime) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _showApproval(relay);
       });
     }
     if (approval == null) {
-      _lastApprovalTool = null;
+      _lastApprovalTime = null;
     }
 
     return Scaffold(

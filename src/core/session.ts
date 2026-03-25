@@ -1,21 +1,27 @@
 import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, timingSafeEqual } from 'node:crypto'
+import { resolve } from 'node:path'
 import { spawn, ChildProcess } from 'node:child_process'
 import stripAnsi from 'strip-ansi'
 import type { SessionConfig, SessionInfo, ApprovalMatch } from './types.js'
 
 const MAX_SESSIONS = 10
-
-// PTY 中回车是 \r (CR)，不是 \n (LF)
-// TUI 应用进入 raw mode 后会禁用 ICRNL，此时只认 \r
 const CR = '\r'
+
+// [C1+C3] Agent 白名单
+const VALID_AGENTS = ['claude', 'codex', 'qoder', 'custom'] as const
 
 // ── Agent 启动命令 ───────────────────────────────────────
 
 const SAFE_CMD_RE = /^[a-zA-Z0-9\-_./~ ]+$/
 
 function buildShellCmd(c: SessionConfig): string {
+  // [C1] 严格校验 agent
+  if (!(VALID_AGENTS as readonly string[]).includes(c.agent)) {
+    throw new Error(`Invalid agent: ${c.agent}`)
+  }
+
   let bin: string
   if (c.customCmd) {
     if (!SAFE_CMD_RE.test(c.customCmd)) {
@@ -43,6 +49,13 @@ function buildShellCmd(c: SessionConfig): string {
 
 function shellEscape(s: string): string {
   return "'" + s.replace(/'/g, "'\\''") + "'"
+}
+
+// ── 常量比较（防时序攻击）───────────────────────────────
+
+export function safeTokenEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false
+  return timingSafeEqual(Buffer.from(a), Buffer.from(b))
 }
 
 // ── 审批检测 ─────────────────────────────────────────────
@@ -89,6 +102,11 @@ export interface Session {
 export class SessionManager extends EventEmitter {
   private sessions = new Map<string, Session & { proc: ChildProcess }>()
 
+  constructor() {
+    super()
+    this.setMaxListeners(20) // [L5] app-server + discord 各注册多个 listener
+  }
+
   start(config: SessionConfig): Session {
     if (this.sessions.size >= MAX_SESSIONS) {
       throw new Error(`Max ${MAX_SESSIONS} concurrent sessions`)
@@ -98,13 +116,22 @@ export class SessionManager extends EventEmitter {
       throw new Error(`Working directory does not exist: ${config.workDir}`)
     }
 
-    const id = randomUUID().slice(0, 8)
+    // [H5] workDir 路径限制 — 必须在 WORK_DIR 或 HOME 下
+    const allowedBase = resolve(process.env.WORK_DIR ?? process.env.HOME ?? '/')
+    const resolvedDir = resolve(config.workDir)
+    if (!resolvedDir.startsWith(allowedBase) && resolvedDir !== allowedBase) {
+      throw new Error(`workDir must be under ${allowedBase}, got: ${resolvedDir}`)
+    }
+
+    // [H1] 防碰撞 ID
+    let id: string
+    do { id = randomUUID().slice(0, 12) } while (this.sessions.has(id))
+
     const shellCmd = buildShellCmd(config)
     const startedAt = Date.now()
 
     console.log(`[session] Starting: ${shellCmd.slice(0, 80)}...`)
 
-    // Python PTY bridge: 真 PTY + 双向 stdin/stdout pipe
     const bridgePath = new URL('../pty-bridge.py', import.meta.url).pathname
     const proc = spawn('python3', [bridgePath, '120', '40', 'zsh', '-ilc', shellCmd], {
       cwd: config.workDir,
@@ -118,12 +145,12 @@ export class SessionManager extends EventEmitter {
     })
 
     if (!proc.pid) {
-      throw new Error(`Failed to spawn zsh`)
+      throw new Error('Failed to spawn process')
     }
 
     console.log(`[session] ${id} spawned (PID: ${proc.pid})`)
 
-    // ── Raw 流: 低延迟 50ms flush → App ────────────────
+    // ── Raw 流: 低延迟 50ms flush → App
     let rawBuf = Buffer.alloc(0)
     let rawTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -135,7 +162,7 @@ export class SessionManager extends EventEmitter {
       }
     }
 
-    // ── Processed 流: 1s 聚合 → Discord ────────────────
+    // ── Processed 流: 1s 聚合 → Discord
     let textBuf = ''
     let textTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -149,7 +176,6 @@ export class SessionManager extends EventEmitter {
         .join('\n')
         .replace(/\n{3,}/g, '\n\n')
         .trim()
-
       textBuf = ''
       if (!clean) return
 
@@ -169,30 +195,32 @@ export class SessionManager extends EventEmitter {
       if (textTimer) { clearTimeout(textTimer); textTimer = null }
     }
 
-    // ── Trust 自动确认 ─────────────────────────────────
-    // 检测 trust 提示关键词（先 strip ANSI 再匹配纯文本）
+    // ── Trust 自动确认
     let trustConfirmed = false
-    let allOutputClean = '' // 累积 strip ANSI 后的纯文本
-
-    // 匹配 trust 提示关键词（跨行，兼容 TUI 输出无空格的情况）
+    let allOutputClean = ''
     const TRUST_RE = /trust[\s\S]*directory|Yes,?\s*I?\s*trust|Enter\s*to\s*confirm|Entertoconfirm|Press\s*enter\s*to\s*continue/i
 
+    // [H4] 防止 error + exit 双重触发
+    let ended = false
+
     const onData = (data: Buffer) => {
-      // Trust 检测（strip ANSI 后匹配纯文本）
+      // Trust 检测
       if (!trustConfirmed) {
         const chunk = stripAnsi(data.toString('utf-8'))
         allOutputClean += chunk
+        // [H2] 限制 buffer 大小
+        if (allOutputClean.length > 10000) {
+          allOutputClean = allOutputClean.slice(-5000)
+        }
         if (TRUST_RE.test(allOutputClean)) {
           trustConfirmed = true
+          allOutputClean = '' // 释放内存
           console.log(`[session] ${id} auto-confirming trust`)
-          // claude: 默认选中 "Yes, I trust this folder"，直接回车确认
-          // codex: 默认选中 "1. Yes, continue"，直接回车确认
-          // 用 CR (\r) — PTY raw mode 下只认 CR
           setTimeout(() => proc.stdin?.write(CR), 500)
         }
       }
 
-      // Raw path — 低延迟
+      // Raw path
       rawBuf = Buffer.concat([rawBuf, data])
       if (rawBuf.length > 4096) {
         if (rawTimer) clearTimeout(rawTimer)
@@ -201,7 +229,7 @@ export class SessionManager extends EventEmitter {
         rawTimer = setTimeout(flushRaw, 50)
       }
 
-      // Processed path — 高聚合
+      // Processed path
       textBuf += data.toString('utf-8')
       if (textBuf.length > 8000) {
         if (textTimer) clearTimeout(textTimer)
@@ -214,19 +242,25 @@ export class SessionManager extends EventEmitter {
     proc.stdout?.on('data', onData)
     proc.stderr?.on('data', onData)
 
+    // [H4] 统一退出处理
+    const onEnd = (code: number) => {
+      if (ended) return
+      ended = true
+      clearTimers()
+      flushRaw()   // [H6] error 路径也 flush
+      flushText()
+      this.emit('ended', id, code)
+      this.sessions.delete(id)
+    }
+
     proc.on('exit', (code) => {
       console.log(`[session] ${id} exited (code: ${code})`)
-      clearTimers()
-      flushRaw()
-      flushText()
-      this.emit('ended', id, code ?? 1)
-      this.sessions.delete(id)
+      onEnd(code ?? 1)
     })
 
     proc.on('error', (err) => {
       console.error(`[session] ${id} error:`, err.message)
-      this.emit('ended', id, 1)
-      this.sessions.delete(id)
+      onEnd(1)
     })
 
     const session: Session & { proc: ChildProcess } = {
@@ -239,11 +273,11 @@ export class SessionManager extends EventEmitter {
       writeBinary: (d) => proc.stdin?.write(d),
       resize: () => {},
       approve() {
-        proc.stdin?.write('y' + CR) // #2: \n → CR
+        proc.stdin?.write('y' + CR)
         this.status = 'running'
       },
       deny() {
-        proc.stdin?.write('n' + CR) // #3: \n → CR
+        proc.stdin?.write('n' + CR)
         this.status = 'running'
       },
       kill() {
@@ -262,7 +296,6 @@ export class SessionManager extends EventEmitter {
 
     this.sessions.set(id, session)
     this.emit('started', id, session.info())
-
     return session
   }
 

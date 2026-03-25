@@ -9,26 +9,18 @@ import '../models/session.dart';
 const _maxEndedHistory = 20;
 const _sessionStorageKey = 'relay_sessions';
 
-/// 连接稳定性策略:
-/// - 断线不立即通知 UI，有 5 秒缓冲期
-/// - 缓冲期内重连成功 → 用户完全无感
-/// - 超过缓冲期才显示断线状态
-/// - sessions/terminals 在断线期间完整保留
-/// - 重连后自动同步状态
 class RelayClient extends ChangeNotifier {
   WebSocketChannel? _ch;
   String _url = '';
   String _token = '';
 
-  // ── 连接状态（去抖）────────────────────────────────────
-  bool _wsConnected = false;     // 底层 WS 连接状态
-  bool _visibleConnected = false; // UI 可见的连接状态（有延迟）
-  Timer? _disconnectDebounce;    // 断线去抖定时器
+  bool _wsConnected = false;
+  bool _visibleConnected = false;
+  Timer? _disconnectDebounce;
   Timer? _heartbeat;
   Timer? _reconnect;
   int _retries = 0;
 
-  // ── Session 状态 ──────────────────────────────────────
   final Map<String, SessionInfo> sessions = {};
   final Map<String, Terminal> terminals = {};
   final Map<String, ApprovalRequest?> approvals = {};
@@ -36,7 +28,6 @@ class RelayClient extends ChangeNotifier {
 
   bool get connected => _visibleConnected;
 
-  // ── 事件回调 ──────────────────────────────────────────
   VoidCallback? onApprovalReceived;
   void Function(String sid)? onSessionStarted;
 
@@ -63,8 +54,7 @@ class RelayClient extends ChangeNotifier {
         onDone: _onWsDrop,
         onError: (_) => _onWsDrop(),
       );
-      // 连接发起后立刻请求同步
-      _send({'t': 'list'});
+      // [FC1] 不在这里发 list — 等 _onWsUp 确认连接后再发
     } catch (_) {
       _scheduleReconnect();
     }
@@ -80,14 +70,15 @@ class RelayClient extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// WS 首次收到数据 = 连接确认
   void _onWsUp() {
     if (_wsConnected) return;
     _wsConnected = true;
     _retries = 0;
     _startHeartbeat();
 
-    // 取消断线去抖（如果有的话），立即恢复 UI 状态
+    // [FC1] 连接确认后才发 list 同步状态
+    _send({'t': 'list'});
+
     _disconnectDebounce?.cancel();
     if (!_visibleConnected) {
       _visibleConnected = true;
@@ -95,18 +86,18 @@ class RelayClient extends ChangeNotifier {
     }
   }
 
-  /// WS 断线处理（去抖）
+  // [FH4] 防止重复触发
   void _onWsDrop() {
+    if (!_wsConnected && _ch == null) return;
     _heartbeat?.cancel();
     _ch = null;
     _wsConnected = false;
 
-    // 不立即通知 UI！给 5 秒缓冲期静默重连
     _disconnectDebounce?.cancel();
     _disconnectDebounce = Timer(const Duration(seconds: 5), () {
       if (!_wsConnected) {
         _visibleConnected = false;
-        notifyListeners(); // 5 秒后仍断线才通知 UI
+        notifyListeners();
       }
     });
 
@@ -116,7 +107,6 @@ class RelayClient extends ChangeNotifier {
   void _scheduleReconnect() {
     if (_url.isEmpty) return;
     final capped = _retries.clamp(0, 4);
-    // 重连间隔：0.5s, 1s, 2s, 4s, 8s (更快重连)
     final delay = Duration(milliseconds: (500 * (1 << capped)).clamp(500, 8000));
     _retries++;
     _reconnect = Timer(delay, () {
@@ -126,7 +116,6 @@ class RelayClient extends ChangeNotifier {
 
   void _startHeartbeat() {
     _heartbeat?.cancel();
-    // 每 30 秒心跳（降低频率，减少不必要的消息）
     _heartbeat = Timer.periodic(const Duration(seconds: 30), (_) {
       _send({'t': 'list'});
     });
@@ -138,8 +127,8 @@ class RelayClient extends ChangeNotifier {
     if (_ch == null) return;
     try {
       _ch!.sink.add(jsonEncode(msg));
-    } catch (_) {
-      // 发送失败不触发 _onWsDrop（让 stream 的 onDone/onError 处理）
+    } catch (e) {
+      debugPrint('Send failed: $e'); // [FM8] 不再静默吞异常
     }
   }
 
@@ -183,9 +172,10 @@ class RelayClient extends ChangeNotifier {
   void stopSession(String sid) => _send({'t': 'stop', 'sid': sid});
   void refresh() => _send({'t': 'list'});
 
+  // [FM14] 清除时 dispose Terminal
   void clearEnded(String sid) {
     endedIds.remove(sid);
-    terminals.remove(sid);
+    terminals.remove(sid)?.dispose();
     approvals.remove(sid);
     notifyListeners();
   }
@@ -193,43 +183,66 @@ class RelayClient extends ChangeNotifier {
   Terminal terminalFor(String sid) =>
       terminals.putIfAbsent(sid, () => Terminal(maxLines: 10000));
 
-  // ── Session 持久化 ────────────────────────────────────
+  // ── Session 持久化 [FM6] 用 JSON 替代 pipe 分隔 ───────
 
   Future<void> saveSessionsLocally() async {
-    final prefs = await SharedPreferences.getInstance();
-    final data = sessions.values
-        .map((s) => '${s.id}|${s.agent}|${s.workDir}|${s.yolo}|${s.startedAt}')
-        .toList();
-    await prefs.setStringList(_sessionStorageKey, data);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final data = sessions.values
+          .map((s) => jsonEncode({
+                'id': s.id,
+                'agent': s.agent,
+                'workDir': s.workDir,
+                'yolo': s.yolo,
+                'startedAt': s.startedAt,
+              }))
+          .toList();
+      await prefs.setStringList(_sessionStorageKey, data);
+    } catch (e) {
+      debugPrint('Save sessions failed: $e');
+    }
   }
 
   Future<void> loadSessionsLocally() async {
-    final prefs = await SharedPreferences.getInstance();
-    final data = prefs.getStringList(_sessionStorageKey) ?? [];
-    for (final entry in data) {
-      final parts = entry.split('|');
-      if (parts.length >= 5) {
-        final id = parts[0];
-        if (!sessions.containsKey(id)) {
-          sessions[id] = SessionInfo(
-            id: id,
-            agent: parts[1],
-            workDir: parts[2],
-            yolo: parts[3] == 'true',
-            status: 'running',
-            startedAt: int.tryParse(parts[4]) ?? 0,
-          );
-          terminalFor(id);
-        }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final data = prefs.getStringList(_sessionStorageKey) ?? [];
+      for (final entry in data) {
+        try {
+          final j = jsonDecode(entry) as Map<String, dynamic>;
+          final id = j['id'] as String;
+          if (!sessions.containsKey(id)) {
+            sessions[id] = SessionInfo(
+              id: id,
+              agent: j['agent'] as String? ?? 'unknown',
+              workDir: j['workDir'] as String? ?? '',
+              yolo: j['yolo'] as bool? ?? false,
+              status: 'running',
+              startedAt: j['startedAt'] as int? ?? 0,
+            );
+            terminalFor(id);
+          }
+        } catch (_) {}
       }
+      notifyListeners();
+    } catch (e) {
+      debugPrint('Load sessions failed: $e');
     }
-    notifyListeners();
+  }
+
+  // ── 辅助：限制 endedIds + terminals [FH3] ─────────────
+
+  void _capEndedHistory() {
+    while (endedIds.length > _maxEndedHistory) {
+      final old = endedIds.removeAt(0);
+      terminals.remove(old)?.dispose();
+      approvals.remove(old);
+    }
   }
 
   // ── 接收 ──────────────────────────────────────────────
 
   void _onRawMessage(dynamic raw) {
-    // 收到任何消息 = WS 确认活着
     _onWsUp();
 
     try {
@@ -251,7 +264,7 @@ class RelayClient extends ChangeNotifier {
           );
           terminalFor(sid);
           onSessionStarted?.call(sid);
-          saveSessionsLocally(); // 持久化
+          saveSessionsLocally();
           break;
 
         case 'data':
@@ -262,8 +275,7 @@ class RelayClient extends ChangeNotifier {
             final bytes = base64Decode(d);
             terminalFor(sid).write(utf8.decode(bytes, allowMalformed: true));
           } catch (_) {}
-          // data 消息不触发 notifyListeners（性能优化，Terminal 自己会刷新）
-          return;
+          return; // 不触发 notifyListeners
 
         case 'approval':
           final sid = msg['sid'] as String? ?? '';
@@ -283,10 +295,7 @@ class RelayClient extends ChangeNotifier {
           approvals.remove(sid);
           if (terminals.containsKey(sid)) {
             endedIds.add(sid);
-            while (endedIds.length > _maxEndedHistory) {
-              final old = endedIds.removeAt(0);
-              terminals.remove(old);
-            }
+            _capEndedHistory(); // [FH3]
           }
           saveSessionsLocally();
           break;
@@ -294,7 +303,6 @@ class RelayClient extends ChangeNotifier {
         case 'list':
           final list = msg['sessions'];
           if (list is! List) break;
-          // 原子更新，不清空（保留本地 terminal）
           final serverIds = <String>{};
           for (final s in list) {
             if (s is! Map<String, dynamic>) continue;
@@ -305,16 +313,17 @@ class RelayClient extends ChangeNotifier {
               terminalFor(info.id);
             } catch (_) {}
           }
-          // 移除服务器已不存在的 session（但保留 terminal 供回看）
           final removedIds = sessions.keys
               .where((id) => !serverIds.contains(id))
               .toList();
           for (final id in removedIds) {
             sessions.remove(id);
+            approvals.remove(id); // [FM7]
             if (terminals.containsKey(id) && !endedIds.contains(id)) {
               endedIds.add(id);
             }
           }
+          _capEndedHistory(); // [FH3]
           saveSessionsLocally();
           break;
 

@@ -10,10 +10,9 @@ import 'screens/home_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 沉浸式状态栏
+  // [FM24] 不硬编码 statusbar 颜色，让主题控制
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
-    statusBarIconBrightness: Brightness.dark,
   ));
 
   final prefs = await SharedPreferences.getInstance();

@@ -3,7 +3,7 @@
 PTY Bridge: 在真 PTY 中运行命令，stdin/stdout 通过 pipe 转发。
 用法: python3 pty-bridge.py <cols> <rows> <cmd> [args...]
 """
-import sys, os, pty, select, signal, struct, fcntl, termios
+import sys, os, pty, select, signal, struct, fcntl, termios, time
 
 if len(sys.argv) < 4:
     print("Usage: pty-bridge.py <cols> <rows> <cmd> [args...]", file=sys.stderr)
@@ -13,11 +13,10 @@ cols = int(sys.argv[1])
 rows = int(sys.argv[2])
 cmd = sys.argv[3:]
 
-# Fork PTY
 pid, fd = pty.fork()
 
 if pid == 0:
-    # Child: 设置终端尺寸，exec 命令
+    # Child
     winsize = struct.pack('HHHH', rows, cols, 0, 0)
     fcntl.ioctl(sys.stdout.fileno(), termios.TIOCSWINSZ, winsize)
     os.environ['TERM'] = 'xterm-256color'
@@ -25,22 +24,27 @@ if pid == 0:
     os.environ['LINES'] = str(rows)
     os.execvp(cmd[0], cmd)
 else:
-    # Parent: 设置 PTY 尺寸
+    # Parent
     winsize = struct.pack('HHHH', rows, cols, 0, 0)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
 
-    # 设置 stdin 为非阻塞
     flags = fcntl.fcntl(sys.stdin.fileno(), fcntl.F_GETFL)
     fcntl.fcntl(sys.stdin.fileno(), fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
-    # 转发 SIGWINCH
-    def on_winch(sig, frame):
-        pass
-    signal.signal(signal.SIGWINCH, on_winch)
+    # [M7] SIGTERM 转发给子进程
+    def on_term(sig, frame):
+        try:
+            os.kill(pid, signal.SIGTERM)
+            time.sleep(0.5)
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, on_term)
+    signal.signal(signal.SIGWINCH, lambda s, f: None)
 
-    stdin_open = True  # #9 修复: 追踪 stdin 是否仍然打开
+    stdin_open = True
 
-    # 主循环: 双向转发 stdin ↔ PTY
     try:
         while True:
             fds_to_watch = [fd]
@@ -54,7 +58,6 @@ else:
                     try:
                         data = os.read(sys.stdin.fileno(), 4096)
                         if not data:
-                            # stdin EOF — 停止监听 stdin，但不终止（让子进程继续）
                             stdin_open = False
                             continue
                         os.write(fd, data)
@@ -70,7 +73,6 @@ else:
                     except (OSError, IOError):
                         break
 
-            # 检查子进程是否退出
             result = os.waitpid(pid, os.WNOHANG)
             if result[0] != 0:
                 # 读完剩余输出

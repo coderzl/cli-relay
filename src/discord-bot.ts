@@ -77,12 +77,13 @@ function formatOutput(text: string): EmbedBuilder[] {
   const chunks = smartChunk(text, MAX_EMBED - 20)
   for (let i = 0; i < chunks.length; i++) {
     const lang = isCodeBlock(chunks[i]) ? detectLang(chunks[i]) : ''
-    embeds.push(
-      new EmbedBuilder()
-        .setColor(C.green)
-        .setDescription(`\`\`\`${lang}\n${chunks[i]}\n\`\`\``)
-        .setFooter(chunks.length > 1 ? { text: `Part ${i + 1}/${chunks.length}` } : null)
-    )
+    const embed = new EmbedBuilder()
+      .setColor(C.green)
+      .setDescription(`\`\`\`${lang}\n${chunks[i]}\n\`\`\``)
+    if (chunks.length > 1) {
+      embed.setFooter({ text: `Part ${i + 1}/${chunks.length}` })
+    }
+    embeds.push(embed)
   }
   return embeds
 }
@@ -91,12 +92,12 @@ function smartChunk(text: string, max: number): string[] {
   const parts: string[] = []
   while (text.length > 0) {
     if (text.length <= max) { parts.push(text); break }
-    // 优先在空行处分割
     let cut = text.lastIndexOf('\n\n', max)
     if (cut < max * 0.3) cut = text.lastIndexOf('\n', max)
     if (cut <= 0) cut = max
     parts.push(text.slice(0, cut))
-    text = text.slice(cut + 1)
+    // [M5] 修复 off-by-one：换行符在 cut 位置时跳过，否则从 cut 开始
+    text = text[cut] === '\n' ? text.slice(cut + 1) : text.slice(cut)
   }
   return parts
 }
@@ -233,6 +234,7 @@ class MessageEditor {
     this.current = null
     this.content = ''
     this.lang = ''
+    this.pendingText = '' // [M6] 清除待发文本
   }
 }
 
@@ -322,10 +324,10 @@ export async function startDiscordBot(sessions: SessionManager) {
         await interaction.reply({ content: 'Session gone', ephemeral: true })
         return
       }
+      await interaction.deferUpdate() // [M1] 先 defer，再执行动作
       if (action === 'approve') s.approve()
       else if (action === 'deny') s.deny()
       else if (action === 'stop') s.kill()
-      await interaction.deferUpdate()
       return
     }
 

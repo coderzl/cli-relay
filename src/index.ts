@@ -13,21 +13,23 @@ if (!AUTH_TOKEN || AUTH_TOKEN === 'changeme') {
 
 const sessions = new SessionManager()
 
-// App WS Server (always starts)
-startAppServer(sessions, WS_PORT, AUTH_TOKEN)
+// App WS Server
+const wss = startAppServer(sessions, WS_PORT, AUTH_TOKEN)
 
-// Discord Bot (optional, gracefully degrade if fails)
+// Discord Bot (optional)
+let discordClient: Awaited<ReturnType<typeof startDiscordBot>> = null
 try {
-  await startDiscordBot(sessions)
+  discordClient = await startDiscordBot(sessions)
 } catch (e) {
   console.warn(`[discord] Failed to start: ${(e as Error).message}`)
-  console.warn('[discord] App WS server is still running.')
 }
 
+// [L4] 优雅退出：关闭 WS server + Discord + 所有会话
 process.on('SIGINT', () => {
   console.log('\nShutting down...')
   sessions.killAll()
-  // 给 PTY 进程 500ms 清理时间
+  wss.close()
+  discordClient?.destroy()
   setTimeout(() => process.exit(0), 500)
 })
 

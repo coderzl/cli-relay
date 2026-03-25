@@ -19,26 +19,26 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
-  bool _navigating = false; // 防止重复跳转
+  bool _navigating = false;
+  late final RelayClient _relay; // [FH15] 缓存引用，dispose 中安全使用
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _relay = context.read<RelayClient>();
 
-    final relay = context.read<RelayClient>();
-
-    // 加载本地持久化的 session
-    relay.loadSessionsLocally();
+    // [FM17] 加载本地持久化的 session（加错误处理）
+    _relay.loadSessionsLocally().catchError((_) {});
 
     // 新 session 创建时自动跳转到对话页
-    relay.onSessionStarted = (sid) {
+    _relay.onSessionStarted = (sid) {
       if (mounted && !_navigating) {
         _navigating = true;
         Navigator.push(
           context,
           CupertinoPageRoute(builder: (_) => SessionScreen(sessionId: sid)),
-        ).then((_) => _navigating = false);
+        ).whenComplete(() => _navigating = false); // [FH16] whenComplete 而非 then
       }
     };
 
@@ -47,7 +47,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
-    context.read<RelayClient>().onSessionStarted = null;
+    _relay.onSessionStarted = null; // [FH15] 用缓存引用
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -55,11 +55,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      final relay = context.read<RelayClient>();
-      if (!relay.connected) {
+      if (!_relay.connected) {
         _autoConnect();
       } else {
-        relay.refresh();
+        _relay.refresh();
       }
     }
   }

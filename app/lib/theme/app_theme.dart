@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 class AppTheme {
-  // iOS system colors
   static const blue = Color(0xFF007AFF);
   static const green = Color(0xFF34C759);
   static const orange = Color(0xFFFF9500);
@@ -24,6 +24,11 @@ class AppTheme {
           centerTitle: true,
           backgroundColor: Color(0xFFF2F2F7),
           surfaceTintColor: Colors.transparent,
+          // [FM24] 浅色主题 → 深色状态栏图标
+          systemOverlayStyle: SystemUiOverlayStyle(
+            statusBarColor: Colors.transparent,
+            statusBarIconBrightness: Brightness.dark,
+          ),
           titleTextStyle: TextStyle(
             color: Colors.black,
             fontSize: 17,
@@ -31,7 +36,6 @@ class AppTheme {
           ),
         ),
         dividerTheme: const DividerThemeData(color: Color(0xFFE5E5EA), thickness: 0.5),
-        fontFamily: '.SF Pro Text',
       );
 
   static ThemeData dark() => ThemeData(
@@ -50,6 +54,11 @@ class AppTheme {
           centerTitle: true,
           backgroundColor: Colors.black,
           surfaceTintColor: Colors.transparent,
+          // [FM24] 深色主题 → 浅色状态栏图标
+          systemOverlayStyle: SystemUiOverlayStyle(
+            statusBarColor: Colors.transparent,
+            statusBarIconBrightness: Brightness.light,
+          ),
           titleTextStyle: TextStyle(
             color: Colors.white,
             fontSize: 17,
@@ -57,6 +66,5 @@ class AppTheme {
           ),
         ),
         dividerTheme: const DividerThemeData(color: Color(0xFF38383A), thickness: 0.5),
-        fontFamily: '.SF Pro Text',
       );
 }

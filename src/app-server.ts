@@ -1,19 +1,24 @@
 import { WebSocketServer, WebSocket } from 'ws'
 import type { IncomingMessage } from 'node:http'
-import { SessionManager } from './core/session.js'
+import { SessionManager, safeTokenEqual } from './core/session.js'
 import type { AppClientMsg, AppServerMsg, SessionInfo, ApprovalMatch } from './core/types.js'
+
+// [C1+C3] Agent 白名单（与 session.ts 保持一致）
+const VALID_AGENTS = ['claude', 'codex', 'qoder', 'custom']
 
 export function startAppServer(
   sessions: SessionManager,
   port: number,
   token: string,
 ) {
-  const wss = new WebSocketServer({ port })
-  const clients = new Set<WebSocket>()
+  // [M9] 限制消息大小 1MB
+  const wss = new WebSocketServer({ port, maxPayload: 1024 * 1024 })
 
   wss.on('error', (err) => {
     console.error(`[app-ws] Server error: ${err.message}`)
   })
+
+  const clients = new Set<WebSocket>()
 
   function send(ws: WebSocket, msg: AppServerMsg) {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
@@ -26,7 +31,7 @@ export function startAppServer(
     }
   }
 
-  // ── Session 事件 → 广播 ───────────────────────────────
+  // ── Session 事件 → 广播
 
   sessions.on('raw', (sid: string, buf: Buffer) => {
     broadcast({ t: 'data', sid, d: buf.toString('base64') })
@@ -44,22 +49,39 @@ export function startAppServer(
     broadcast({ t: 'ended', sid, code })
   })
 
-  // ── 输入验证 ──────────────────────────────────────────
+  // ── 输入验证 [C3] 加 agent 白名单
 
   function validateStart(c: unknown): boolean {
     if (!c || typeof c !== 'object') return false
     const obj = c as Record<string, unknown>
     return typeof obj.agent === 'string' &&
+           VALID_AGENTS.includes(obj.agent as string) && // [C3]
            typeof obj.prompt === 'string' &&
            typeof obj.workDir === 'string' &&
            typeof obj.yolo === 'boolean'
   }
 
-  // ── 客户端连接 ────────────────────────────────────────
+  // ── [M3] 简易速率限制
+  const msgCounts = new WeakMap<WebSocket, { count: number; resetAt: number }>()
+  function rateLimit(ws: WebSocket): boolean {
+    const now = Date.now()
+    let entry = msgCounts.get(ws)
+    if (!entry || now > entry.resetAt) {
+      entry = { count: 0, resetAt: now + 1000 }
+      msgCounts.set(ws, entry)
+    }
+    entry.count++
+    return entry.count > 50 // 50 msg/s
+  }
+
+  // ── 客户端连接
 
   wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host}`)
-    if (url.searchParams.get('token') !== token) {
+    const clientToken = url.searchParams.get('token') ?? ''
+
+    // [C2] 时序安全的 token 比较
+    if (!safeTokenEqual(clientToken, token)) {
       ws.close(4001, 'Unauthorized')
       return
     }
@@ -72,10 +94,16 @@ export function startAppServer(
       if (ws.readyState === WebSocket.OPEN) ws.ping()
     }, 10000)
 
-    // 推送当前会话列表（不重放历史，App 端 xterm 有自己的 buffer）
+    // 推送当前会话列表
     send(ws, { t: 'list', sessions: sessions.list() })
 
     ws.on('message', (raw) => {
+      // [M3] 速率限制
+      if (rateLimit(ws)) {
+        send(ws, { t: 'error', msg: 'Rate limited' })
+        return
+      }
+
       try {
         const msg = JSON.parse(raw.toString()) as AppClientMsg
         if (!msg || typeof msg.t !== 'string') {
