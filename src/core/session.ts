@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import pty from 'node-pty'
+import { spawn, ChildProcess } from 'node:child_process'
 import stripAnsi from 'strip-ansi'
 import type { SessionConfig, SessionInfo, ApprovalMatch } from './types.js'
 
@@ -9,29 +9,28 @@ const MAX_SESSIONS = 10
 
 // ── Agent 启动命令 ───────────────────────────────────────
 
-// customCmd 白名单: 仅允许字母、数字、-_./ 和空格
 const SAFE_CMD_RE = /^[a-zA-Z0-9\-_./~ ]+$/
 
-function agentCmd(c: SessionConfig): [string, string[]] {
+function buildShellCmd(c: SessionConfig): string {
+  let bin: string
   if (c.customCmd) {
     if (!SAFE_CMD_RE.test(c.customCmd)) {
       throw new Error(`Invalid custom command: ${c.customCmd}`)
     }
-    const yoloFlag = c.yolo ? ' --dangerously-skip-permissions' : ''
-    const fullCmd = `${c.customCmd}${yoloFlag} ${shellEscape(c.prompt)}`
-    return ['zsh', ['-ilc', fullCmd]]
+    bin = c.customCmd
+  } else {
+    bin = c.agent === 'custom' ? 'claude' : c.agent
   }
 
-  switch (c.agent) {
-    case 'claude':
-      return ['claude', c.yolo ? ['--dangerously-skip-permissions', c.prompt] : [c.prompt]]
-    case 'codex':
-      return ['codex', c.yolo ? ['--full-auto', c.prompt] : [c.prompt]]
-    case 'qoder':
-      return ['qoder', c.yolo ? ['--yolo', c.prompt] : [c.prompt]]
-    case 'custom':
-      return ['claude', [c.prompt]]
+  const yoloFlags: Record<string, string> = {
+    claude: '--dangerously-skip-permissions',
+    codex: '--full-auto',
+    qoder: '--yolo',
+    custom: '--dangerously-skip-permissions',
   }
+  const yoloFlag = c.yolo ? ` ${yoloFlags[c.agent] ?? ''}` : ''
+  const prompt = c.prompt.trim() ? ` ${shellEscape(c.prompt)}` : ''
+  return `${bin}${yoloFlag}${prompt}`
 }
 
 function shellEscape(s: string): string {
@@ -61,16 +60,6 @@ function detectApproval(text: string): ApprovalMatch | null {
   return null
 }
 
-// ── 清理 env ─────────────────────────────────────────────
-
-function cleanEnv(): Record<string, string> {
-  const env: Record<string, string> = {}
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v !== undefined) env[k] = v
-  }
-  return env
-}
-
 // ── Session 接口 ─────────────────────────────────────────
 
 export interface Session {
@@ -88,46 +77,43 @@ export interface Session {
 }
 
 // ── SessionManager ───────────────────────────────────────
-//
-// 双路事件:
-//   'raw'       (sid, Buffer)         → App WS: 原始 PTY 字节
-//   'processed' (sid, string, isLong) → Discord: 清理后文本
-//   'approval'  (sid, ApprovalMatch)  → 两端: 权限请求
-//   'started'   (sid, SessionInfo)    → 两端: 会话启动
-//   'ended'     (sid, exitCode)       → 两端: 会话结束
 
 export class SessionManager extends EventEmitter {
-  private sessions = new Map<string, Session & { pty: pty.IPty }>()
+  private sessions = new Map<string, Session & { proc: ChildProcess }>()
 
   start(config: SessionConfig): Session {
-    // 并发会话限制
     if (this.sessions.size >= MAX_SESSIONS) {
       throw new Error(`Max ${MAX_SESSIONS} concurrent sessions`)
     }
 
-    // 验证 workDir
     if (!config.workDir || !existsSync(config.workDir)) {
       throw new Error(`Working directory does not exist: ${config.workDir}`)
     }
 
-    // 唯一 ID (无碰撞)
     const id = randomUUID().slice(0, 8)
-    const [cmd, args] = agentCmd(config)
+    const shellCmd = buildShellCmd(config)
     const startedAt = Date.now()
 
-    // PTY 启动 (catch spawn failure)
-    let term: pty.IPty
-    try {
-      term = pty.spawn(cmd, args, {
-        name: 'xterm-256color',
-        cols: 120,
-        rows: 40,
-        cwd: config.workDir,
-        env: cleanEnv(),
-      })
-    } catch (e) {
-      throw new Error(`Failed to spawn ${cmd}: ${(e as Error).message}`)
+    console.log(`[session] Starting: ${shellCmd.slice(0, 80)}...`)
+
+    // Python PTY bridge: 真 PTY + 双向 stdin/stdout pipe
+    const bridgePath = new URL('../pty-bridge.py', import.meta.url).pathname
+    const proc = spawn('python3', [bridgePath, '120', '40', 'zsh', '-ilc', shellCmd], {
+      cwd: config.workDir,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        TERM: 'xterm-256color',
+        COLUMNS: '120',
+        LINES: '40',
+      },
+    })
+
+    if (!proc.pid) {
+      throw new Error(`Failed to spawn zsh`)
     }
+
+    console.log(`[session] ${id} spawned (PID: ${proc.pid})`)
 
     // ── Raw 流: 低延迟 50ms flush → App ────────────────
     let rawBuf = Buffer.alloc(0)
@@ -175,9 +161,9 @@ export class SessionManager extends EventEmitter {
       if (textTimer) { clearTimeout(textTimer); textTimer = null }
     }
 
-    term.onData((data) => {
-      const buf = Buffer.from(data, 'utf-8')
-      rawBuf = Buffer.concat([rawBuf, buf])
+    const onData = (data: Buffer) => {
+      // Raw path
+      rawBuf = Buffer.concat([rawBuf, data])
       if (rawBuf.length > 4096) {
         if (rawTimer) clearTimeout(rawTimer)
         flushRaw()
@@ -185,45 +171,54 @@ export class SessionManager extends EventEmitter {
         rawTimer = setTimeout(flushRaw, 50)
       }
 
-      textBuf += data
+      // Processed path
+      textBuf += data.toString('utf-8')
       if (textBuf.length > 8000) {
         if (textTimer) clearTimeout(textTimer)
         flushText()
       } else if (!textTimer) {
         textTimer = setTimeout(flushText, 1000)
       }
-    })
+    }
 
-    term.onExit(({ exitCode }) => {
+    proc.stdout?.on('data', onData)
+    proc.stderr?.on('data', onData)
+
+    proc.on('exit', (code) => {
+      console.log(`[session] ${id} exited (code: ${code})`)
       clearTimers()
       flushRaw()
       flushText()
-      this.emit('ended', id, exitCode)
+      this.emit('ended', id, code ?? 1)
       this.sessions.delete(id)
     })
 
-    const session: Session & { pty: pty.IPty } = {
+    proc.on('error', (err) => {
+      console.error(`[session] ${id} error:`, err.message)
+      this.emit('ended', id, 1)
+      this.sessions.delete(id)
+    })
+
+    const session: Session & { proc: ChildProcess } = {
       id,
       config,
       status: 'running',
       startedAt,
-      pty: term,
-      write: (d) => term.write(d),
-      writeBinary: (d) => term.write(d.toString('utf-8')),
-      resize: (cols, rows) => {
-        if (cols > 0 && rows > 0) term.resize(cols, rows)
-      },
+      proc,
+      write: (d) => proc.stdin?.write(d),
+      writeBinary: (d) => proc.stdin?.write(d),
+      resize: () => {}, // child_process 不支持 resize，忽略
       approve() {
-        term.write('y\n')
+        proc.stdin?.write('y\n')
         this.status = 'running'
       },
       deny() {
-        term.write('n\n')
+        proc.stdin?.write('n\n')
         this.status = 'running'
       },
       kill() {
         clearTimers()
-        term.kill()
+        proc.kill('SIGTERM')
       },
       info: () => ({
         id,
@@ -244,7 +239,6 @@ export class SessionManager extends EventEmitter {
   list(): SessionInfo[] { return [...this.sessions.values()].map((s) => s.info()) }
 
   killAll() {
-    // 只 kill，让 onExit 自然清理
     for (const s of this.sessions.values()) s.kill()
   }
 }

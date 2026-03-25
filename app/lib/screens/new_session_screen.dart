@@ -31,7 +31,6 @@ class _NewSessionScreenState extends State<NewSessionScreen> {
   bool get _isCustom => _agents[_agentIdx] == 'custom';
 
   void _start() {
-    if (_promptCtrl.text.trim().isEmpty) return;
     HapticFeedback.mediumImpact();
 
     context.read<RelayClient>().startSession(
@@ -111,7 +110,7 @@ class _NewSessionScreenState extends State<NewSessionScreen> {
             // Prompt
             _field(
               ctrl: _promptCtrl,
-              hint: 'What should the agent do?',
+              hint: 'Prompt (optional, leave empty for interactive)',
               icon: CupertinoIcons.text_cursor,
               isDark: isDark,
               theme: theme,

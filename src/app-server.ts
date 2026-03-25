@@ -26,13 +26,26 @@ export function startAppServer(
     }
   }
 
-  // ── Session 事件 → 广播 ───────────────────────────────
+  // ── 输出缓存: 重连后重放，保证不丢输出 ─────────────────
+
+  const outputHistory = new Map<string, string[]>() // sid → base64 chunks
+  const MAX_HISTORY = 200 // 每个 session 最多缓存 200 条
+
+  // ── Session 事件 → 广播 + 缓存 ────────────────────────
 
   sessions.on('raw', (sid: string, buf: Buffer) => {
-    broadcast({ t: 'data', sid, d: buf.toString('base64') })
+    const b64 = buf.toString('base64')
+    // 缓存
+    if (!outputHistory.has(sid)) outputHistory.set(sid, [])
+    const hist = outputHistory.get(sid)!
+    hist.push(b64)
+    if (hist.length > MAX_HISTORY) hist.shift()
+    // 广播
+    broadcast({ t: 'data', sid, d: b64 })
   })
 
   sessions.on('started', (sid: string, info: SessionInfo) => {
+    outputHistory.set(sid, [])
     broadcast({ t: 'started', sid, agent: info.agent, workDir: info.workDir })
   })
 
@@ -42,6 +55,8 @@ export function startAppServer(
 
   sessions.on('ended', (sid: string, code: number) => {
     broadcast({ t: 'ended', sid, code })
+    // 保留历史 5 分钟供回看
+    setTimeout(() => outputHistory.delete(sid), 5 * 60 * 1000)
   })
 
   // ── 输入验证 ──────────────────────────────────────────
@@ -67,7 +82,22 @@ export function startAppServer(
     clients.add(ws)
     console.log(`[app-ws] +1 client (${clients.size})`)
 
+    // Ping 保活 (每 10 秒)
+    const pingInterval = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) ws.ping()
+    }, 10000)
+
+    // 推送当前会话列表
     send(ws, { t: 'list', sessions: sessions.list() })
+
+    // 重连时重放所有活跃 session 的输出历史
+    for (const info of sessions.list()) {
+      send(ws, { t: 'started', sid: info.id, agent: info.agent, workDir: info.workDir })
+      const hist = outputHistory.get(info.id) ?? []
+      for (const d of hist) {
+        send(ws, { t: 'data', sid: info.id, d })
+      }
+    }
 
     ws.on('message', (raw) => {
       try {
@@ -123,6 +153,7 @@ export function startAppServer(
     })
 
     ws.on('close', () => {
+      clearInterval(pingInterval)
       clients.delete(ws)
       console.log(`[app-ws] -1 client (${clients.size})`)
     })
