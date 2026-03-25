@@ -14,7 +14,7 @@ dependencies:
   web_socket_channel: ^3.0.1
   provider: ^6.1.2
   shared_preferences: ^2.3.0
-  flutter_local_notifications: ^18.0.1
+  # flutter_local_notifications: ^18.0.1  # TODO: re-enable with desugaring
 
 dev_dependencies:
   flutter_test:
