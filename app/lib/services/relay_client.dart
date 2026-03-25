@@ -174,7 +174,7 @@ class RelayClient extends ChangeNotifier {
   // [FM14] 清除时 dispose Terminal
   void clearEnded(String sid) {
     endedIds.remove(sid);
-    terminals.remove(sid)?.dispose();
+    terminals.remove(sid);
     approvals.remove(sid);
     notifyListeners();
   }
@@ -234,7 +234,7 @@ class RelayClient extends ChangeNotifier {
   void _capEndedHistory() {
     while (endedIds.length > _maxEndedHistory) {
       final old = endedIds.removeAt(0);
-      terminals.remove(old)?.dispose();
+      terminals.remove(old);
       approvals.remove(old);
     }
   }
@@ -343,10 +343,7 @@ class RelayClient extends ChangeNotifier {
     _reconnect?.cancel();
     _disconnectDebounce?.cancel();
     disconnect();
-    // [F5] dispose 所有 Terminal 对象
-    for (final t in terminals.values) {
-      t.dispose();
-    }
+    // xterm 4.0 Terminal 无 dispose 方法，直接清空引用
     terminals.clear();
     super.dispose();
   }
