@@ -1,0 +1,28 @@
+workflows:
+  android-release:
+    name: Android Release APK
+    max_build_duration: 30
+    instance_type: mac_mini_m2
+    working_directory: app
+
+    environment:
+      flutter: stable
+      java: 17
+
+    scripts:
+      - name: Get packages
+        script: flutter packages pub get
+
+      - name: Build APK
+        script: flutter build apk --release
+
+    artifacts:
+      - build/app/outputs/flutter-apk/app-release.apk
+
+    publishing:
+      email:
+        recipients:
+          - coderzl@163.com
+        notify:
+          success: true
+          failure: true
