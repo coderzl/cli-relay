@@ -10,8 +10,11 @@ workflows:
       java: 17
 
     scripts:
-      - name: Get packages
-        script: flutter packages pub get
+      - name: Generate Android project files
+        script: |
+          # Flutter 项目手写的，需要生成 android/ 目录
+          flutter create --platforms android --org com.coderzl .
+          flutter pub get
 
       - name: Build APK
         script: flutter build apk --release
