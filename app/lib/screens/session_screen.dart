@@ -42,7 +42,7 @@ class _SessionScreenState extends State<SessionScreen> {
   void _sendInput() {
     final text = _inputCtrl.text;
     if (text.isEmpty) return;
-    context.read<RelayClient>().sendInput(widget.sessionId, '$text\n');
+    context.read<RelayClient>().sendInput(widget.sessionId, '$text\r'); // PTY: CR not LF
     _inputCtrl.clear();
   }
 
@@ -211,7 +211,7 @@ class _SessionScreenState extends State<SessionScreen> {
             color: AppTheme.green,
             onTap: () {
               HapticFeedback.lightImpact();
-              relay.sendInput(widget.sessionId, 'y\n');
+              relay.sendInput(widget.sessionId, 'y\r');
             },
           ),
           const SizedBox(width: 6),
@@ -220,7 +220,7 @@ class _SessionScreenState extends State<SessionScreen> {
             color: AppTheme.red,
             onTap: () {
               HapticFeedback.lightImpact();
-              relay.sendInput(widget.sessionId, 'n\n');
+              relay.sendInput(widget.sessionId, 'n\r');
             },
           ),
           const SizedBox(width: 10),

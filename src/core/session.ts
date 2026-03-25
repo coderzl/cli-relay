@@ -7,6 +7,10 @@ import type { SessionConfig, SessionInfo, ApprovalMatch } from './types.js'
 
 const MAX_SESSIONS = 10
 
+// PTY 中回车是 \r (CR)，不是 \n (LF)
+// TUI 应用进入 raw mode 后会禁用 ICRNL，此时只认 \r
+const CR = '\r'
+
 // ── Agent 启动命令 ───────────────────────────────────────
 
 const SAFE_CMD_RE = /^[a-zA-Z0-9\-_./~ ]+$/
@@ -28,7 +32,6 @@ function buildShellCmd(c: SessionConfig): string {
     qoder: '--yolo',
     custom: '--dangerously-skip-permissions',
   }
-  // claude: 加 --permission-mode bypassPermissions 跳过 trust 弹窗
   const extraFlags: Record<string, string> = {
     claude: '--permission-mode bypassPermissions',
   }
@@ -166,24 +169,30 @@ export class SessionManager extends EventEmitter {
       if (textTimer) { clearTimeout(textTimer); textTimer = null }
     }
 
-    // 自动检测并确认 trust 提示
+    // ── Trust 自动确认 ─────────────────────────────────
+    // 检测 trust 提示关键词（先 strip ANSI 再匹配纯文本）
     let trustConfirmed = false
-    let allOutput = ''
+    let allOutputClean = '' // 累积 strip ANSI 后的纯文本
+
+    // 匹配 trust 提示关键词（跨行，兼容 TUI 输出无空格的情况）
+    const TRUST_RE = /trust[\s\S]*directory|Yes,?\s*I?\s*trust|Enter\s*to\s*confirm|Entertoconfirm|Press\s*enter\s*to\s*continue/i
 
     const onData = (data: Buffer) => {
-      // 检测 trust 提示并自动确认
+      // Trust 检测（strip ANSI 后匹配纯文本）
       if (!trustConfirmed) {
-        allOutput += data.toString('utf-8')
-        // 检测 codex/claude 的 trust 提示关键词
-        if (/trust.*directory|Yes,\s*continue|Press enter to continue/i.test(allOutput)) {
+        const chunk = stripAnsi(data.toString('utf-8'))
+        allOutputClean += chunk
+        if (TRUST_RE.test(allOutputClean)) {
           trustConfirmed = true
           console.log(`[session] ${id} auto-confirming trust`)
-          // 发送 "1\n" 选择 "Yes, continue"，再发回车确认
-          setTimeout(() => proc.stdin?.write('1\n'), 500)
+          // claude: 默认选中 "Yes, I trust this folder"，直接回车确认
+          // codex: 默认选中 "1. Yes, continue"，直接回车确认
+          // 用 CR (\r) — PTY raw mode 下只认 CR
+          setTimeout(() => proc.stdin?.write(CR), 500)
         }
       }
 
-      // Raw path
+      // Raw path — 低延迟
       rawBuf = Buffer.concat([rawBuf, data])
       if (rawBuf.length > 4096) {
         if (rawTimer) clearTimeout(rawTimer)
@@ -192,7 +201,7 @@ export class SessionManager extends EventEmitter {
         rawTimer = setTimeout(flushRaw, 50)
       }
 
-      // Processed path
+      // Processed path — 高聚合
       textBuf += data.toString('utf-8')
       if (textBuf.length > 8000) {
         if (textTimer) clearTimeout(textTimer)
@@ -228,13 +237,13 @@ export class SessionManager extends EventEmitter {
       proc,
       write: (d) => proc.stdin?.write(d),
       writeBinary: (d) => proc.stdin?.write(d),
-      resize: () => {}, // child_process 不支持 resize，忽略
+      resize: () => {},
       approve() {
-        proc.stdin?.write('y\n')
+        proc.stdin?.write('y' + CR) // #2: \n → CR
         this.status = 'running'
       },
       deny() {
-        proc.stdin?.write('n\n')
+        proc.stdin?.write('n' + CR) // #3: \n → CR
         this.status = 'running'
       },
       kill() {

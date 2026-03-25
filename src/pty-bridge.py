@@ -38,20 +38,28 @@ else:
         pass
     signal.signal(signal.SIGWINCH, on_winch)
 
+    stdin_open = True  # #9 修复: 追踪 stdin 是否仍然打开
+
     # 主循环: 双向转发 stdin ↔ PTY
     try:
         while True:
-            rlist, _, _ = select.select([sys.stdin.fileno(), fd], [], [], 0.1)
+            fds_to_watch = [fd]
+            if stdin_open:
+                fds_to_watch.append(sys.stdin.fileno())
+
+            rlist, _, _ = select.select(fds_to_watch, [], [], 0.1)
 
             for r in rlist:
                 if r == sys.stdin.fileno():
                     try:
                         data = os.read(sys.stdin.fileno(), 4096)
                         if not data:
-                            break
+                            # stdin EOF — 停止监听 stdin，但不终止（让子进程继续）
+                            stdin_open = False
+                            continue
                         os.write(fd, data)
                     except (OSError, IOError):
-                        pass
+                        stdin_open = False
                 elif r == fd:
                     try:
                         data = os.read(fd, 4096)

@@ -410,7 +410,7 @@ export async function startDiscordBot(sessions: SessionManager) {
     if (msg.author.bot || msg.author.id !== OWNER_ID) return
     for (const [sid, entry] of live) {
       if (entry.threadId === msg.channelId) {
-        sessions.get(sid)?.write(msg.content + '\n')
+        sessions.get(sid)?.write(msg.content + '\r') // PTY raw mode 需要 CR
         // 新输入后 → 开新消息块
         entry.editor.reset()
         break
