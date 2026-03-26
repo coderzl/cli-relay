@@ -19,8 +19,7 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
-  bool _navigating = false;
-  late final RelayClient _relay; // [FH15] 缓存引用，dispose 中安全使用
+  late final RelayClient _relay;
 
   @override
   void initState() {
@@ -28,24 +27,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _relay = context.read<RelayClient>();
 
-    // [FM17] 加载本地持久化的 session（加错误处理）
     _relay.loadSessionsLocally().catchError((_) {});
-
-    // 新 session 创建时自动跳转到对话页
-    _relay.onSessionStarted = (sid) {
-      if (mounted && !_navigating) {
-        _navigating = true;
-        Navigator.push(
-          context,
-          CupertinoPageRoute(builder: (_) => SessionScreen(sessionId: sid)),
-        ).whenComplete(() => _navigating = false);
-      }
-    };
 
     _relay.onError = (msg) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error: $msg'), behavior: SnackBarBehavior.floating),
+          SnackBar(
+              content: Text('Error: $msg'),
+              behavior: SnackBarBehavior.floating),
         );
       }
     };
@@ -55,7 +44,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
-    _relay.onSessionStarted = null;
     _relay.onError = null;
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
@@ -77,37 +65,61 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final url = prefs.getString('server_url');
     final token = prefs.getString('auth_token');
     if (url != null && token != null && url.isNotEmpty && mounted) {
-      _relay.connect(url, token); // [F2] 用缓存引用，避免 async gap 后 context.read
+      _relay.connect(url, token);
     }
+  }
+
+  void _openNewSession() {
+    HapticFeedback.mediumImpact();
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => const NewSessionScreen(),
+    ).then((sid) {
+      if (sid != null && sid is String && mounted) {
+        Navigator.push(
+          context,
+          CupertinoPageRoute(
+              builder: (_) => SessionScreen(sessionId: sid)),
+        );
+      }
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     final relay = context.watch<RelayClient>();
     final theme = Theme.of(context);
-    final sessions = relay.sessions.values.toList();
+    final sessions = relay.sessions.values.toList()
+      ..sort((a, b) => b.startedAt.compareTo(a.startedAt));
     final ended = relay.endedIds;
+
+    // 连接状态颜色
+    final connState = relay.connectionState;
+    final dotColor = switch (connState) {
+      RelayConnectionState.connected => const Color(0xFF34C759),
+      RelayConnectionState.connecting ||
+      RelayConnectionState.reconnecting =>
+        const Color(0xFFFF9500),
+      RelayConnectionState.disconnected => Colors.grey,
+    };
 
     return Scaffold(
       appBar: AppBar(
         title: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // 连接指示灯：绿=连接，橙=重连中（不用红色减少焦虑）
             AnimatedContainer(
               duration: const Duration(milliseconds: 300),
-              width: 8, height: 8,
+              width: 8,
+              height: 8,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: relay.connected
-                    ? const Color(0xFF34C759)
-                    : const Color(0xFFFF9500),
+                color: dotColor,
                 boxShadow: [
                   BoxShadow(
-                    color: (relay.connected
-                            ? const Color(0xFF34C759)
-                            : const Color(0xFFFF9500))
-                        .withAlpha(100),
+                    color: dotColor.withAlpha(100),
                     blurRadius: 6,
                   ),
                 ],
@@ -123,8 +135,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             onPressed: () {
               HapticFeedback.lightImpact();
               final svc = context.read<ThemeService>();
-              final modes = [ThemeMode.system, ThemeMode.light, ThemeMode.dark];
-              final next = modes[(modes.indexOf(svc.themeMode) + 1) % 3];
+              final modes = [
+                ThemeMode.system,
+                ThemeMode.light,
+                ThemeMode.dark
+              ];
+              final next =
+                  modes[(modes.indexOf(svc.themeMode) + 1) % 3];
               svc.setMode(next);
             },
           ),
@@ -136,28 +153,31 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         ],
       ),
       body: sessions.isEmpty && ended.isEmpty
-          ? _buildEmpty(relay.connected, theme)
+          ? _buildEmpty(relay, theme)
           : RefreshIndicator(
               onRefresh: () async => relay.refresh(),
               child: ListView(
                 physics: const AlwaysScrollableScrollPhysics(),
                 children: [
                   if (sessions.isNotEmpty) ...[
-                    _sectionHeader('ACTIVE · ${sessions.length}', theme),
+                    _sectionHeader(
+                        'ACTIVE \u00b7 ${sessions.length}', theme),
                     ...sessions.map((s) => SessionCard(
                           session: s,
                           hasApproval: relay.approvals[s.id] != null,
                           onTap: () => Navigator.push(
                             context,
                             CupertinoPageRoute(
-                              builder: (_) => SessionScreen(sessionId: s.id),
+                              builder: (_) =>
+                                  SessionScreen(sessionId: s.id),
                             ),
                           ),
                         )),
                   ],
                   if (ended.isNotEmpty) ...[
                     _sectionHeader('HISTORY', theme),
-                    ...ended.map((id) => _historyTile(id, relay, theme)),
+                    ...ended.map(
+                        (id) => _historyTile(id, relay, theme)),
                   ],
                   const SizedBox(height: 100),
                 ],
@@ -165,15 +185,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             ),
       floatingActionButton: relay.connected
           ? FloatingActionButton(
-              onPressed: () {
-                HapticFeedback.mediumImpact();
-                showModalBottomSheet(
-                  context: context,
-                  isScrollControlled: true,
-                  backgroundColor: Colors.transparent,
-                  builder: (_) => const NewSessionScreen(),
-                );
-              },
+              onPressed: _openNewSession,
               backgroundColor: theme.colorScheme.primary,
               foregroundColor: Colors.white,
               elevation: 3,
@@ -183,7 +195,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
-  Widget _buildEmpty(bool connected, ThemeData theme) {
+  Widget _buildEmpty(RelayClient relay, ThemeData theme) {
+    final connState = relay.connectionState;
+    final label = switch (connState) {
+      RelayConnectionState.connected => 'No active sessions',
+      RelayConnectionState.connecting => 'Connecting...',
+      RelayConnectionState.reconnecting => 'Reconnecting...',
+      RelayConnectionState.disconnected => 'Not connected',
+    };
+    final sub = switch (connState) {
+      RelayConnectionState.connected => 'Tap + to start',
+      RelayConnectionState.connecting ||
+      RelayConnectionState.reconnecting =>
+        'Please wait...',
+      RelayConnectionState.disconnected =>
+        'Go to Settings to connect',
+    };
+
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -191,7 +219,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           const AppLogo(size: 72),
           const SizedBox(height: 24),
           Text(
-            connected ? 'No active sessions' : 'Not connected',
+            label,
             style: TextStyle(
               fontSize: 18,
               fontWeight: FontWeight.w600,
@@ -200,8 +228,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           ),
           const SizedBox(height: 8),
           Text(
-            connected ? 'Tap + to start' : 'Go to Settings to connect',
-            style: TextStyle(fontSize: 14, color: Colors.grey.shade400),
+            sub,
+            style:
+                TextStyle(fontSize: 14, color: Colors.grey.shade400),
           ),
         ],
       ),
@@ -221,7 +250,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
-  Widget _historyTile(String id, RelayClient relay, ThemeData theme) {
+  Widget _historyTile(
+      String id, RelayClient relay, ThemeData theme) {
     return Dismissible(
       key: ValueKey(id),
       direction: DismissDirection.endToStart,
@@ -229,33 +259,45 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       background: Container(
         alignment: Alignment.centerRight,
         padding: const EdgeInsets.only(right: 24),
-        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        margin:
+            const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
         decoration: BoxDecoration(
           color: const Color(0xFFFF3B30),
           borderRadius: BorderRadius.circular(14),
         ),
-        child: const Icon(CupertinoIcons.delete, color: Colors.white),
+        child: const Icon(CupertinoIcons.delete,
+            color: Colors.white),
       ),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        padding:
+            const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
         child: Material(
           color: theme.cardTheme.color,
           borderRadius: BorderRadius.circular(14),
           child: ListTile(
-            onTap: () => Navigator.push(context,
-                CupertinoPageRoute(builder: (_) => SessionScreen(sessionId: id))),
-            contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            onTap: () => Navigator.push(
+                context,
+                CupertinoPageRoute(
+                    builder: (_) =>
+                        SessionScreen(sessionId: id))),
+            contentPadding: const EdgeInsets.symmetric(
+                horizontal: 16, vertical: 6),
             leading: Container(
-              width: 44, height: 44,
+              width: 44,
+              height: 44,
               decoration: BoxDecoration(
                 color: Colors.grey.withAlpha(20),
                 borderRadius: BorderRadius.circular(12),
               ),
-              child: const Icon(CupertinoIcons.doc_text, size: 20, color: Colors.grey),
+              child: const Icon(CupertinoIcons.doc_text,
+                  size: 20, color: Colors.grey),
             ),
-            title: Text(id, style: const TextStyle(fontFamily: 'monospace', fontSize: 15)),
-            subtitle: const Text('Ended — tap to review',
-                style: TextStyle(fontSize: 13, color: Colors.grey)),
+            title: Text(id,
+                style: const TextStyle(
+                    fontFamily: 'monospace', fontSize: 15)),
+            subtitle: const Text('Ended \u2014 tap to review',
+                style:
+                    TextStyle(fontSize: 13, color: Colors.grey)),
             trailing: Icon(CupertinoIcons.chevron_forward,
                 size: 14, color: Colors.grey.shade400),
           ),

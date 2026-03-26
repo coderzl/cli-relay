@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -9,27 +10,61 @@ import '../models/session.dart';
 const _maxEndedHistory = 20;
 const _sessionStorageKey = 'relay_sessions';
 
+enum RelayConnectionState { disconnected, connecting, connected, reconnecting }
+
 class RelayClient extends ChangeNotifier {
   WebSocketChannel? _ch;
   String _url = '';
   String _token = '';
 
   bool _wsConnected = false;
-  bool _visibleConnected = false;
+  RelayConnectionState _connectionState = RelayConnectionState.disconnected;
   Timer? _disconnectDebounce;
   Timer? _heartbeat;
   Timer? _reconnect;
   int _retries = 0;
 
+  String _clientId = '';
+  String _serverDefaultWorkDir = '';
+
   final Map<String, SessionInfo> sessions = {};
   final Map<String, Terminal> terminals = {};
   final Map<String, ApprovalRequest?> approvals = {};
   final List<String> endedIds = [];
+  final Map<String, Completer<StartResult>> _pendingStarts = {};
+  final Map<String, Timer> _pendingStartTimers = {};
 
-  bool get connected => _visibleConnected;
+  RelayConnectionState get connectionState => _connectionState;
+  bool get connected => _connectionState == RelayConnectionState.connected;
+  String get clientId => _clientId;
+  String get serverDefaultWorkDir => _serverDefaultWorkDir;
 
-  void Function(String sid)? onSessionStarted;
-  void Function(String msg)? onError; // 服务端错误回调
+  void Function(String msg)? onError;
+
+  /// 用 SharedPreferences 初始化 clientId（同步，在 main 中调用）
+  void initWithPrefs(SharedPreferences prefs) {
+    final stored = prefs.getString('client_id');
+    if (stored != null && stored.isNotEmpty) {
+      _clientId = stored;
+    } else {
+      _clientId = _generateClientId();
+      prefs.setString('client_id', _clientId);
+    }
+  }
+
+  static String _generateClientId() {
+    final r = Random();
+    final ts = DateTime.now().millisecondsSinceEpoch.toRadixString(36);
+    final rand = r.nextInt(0xFFFFFF).toRadixString(36).padLeft(4, '0');
+    return '$ts$rand';
+  }
+
+  static String _generateReqId() {
+    final r = Random();
+    final ts = DateTime.now().millisecondsSinceEpoch.toRadixString(36);
+    final rand = r.nextInt(0xFFFF).toRadixString(36).padLeft(3, '0');
+    return '$ts$rand';
+  }
 
   // ── 连接 ──────────────────────────────────────────────
 
@@ -40,6 +75,7 @@ class RelayClient extends ChangeNotifier {
     _url = url;
     _token = token;
     _retries = 0;
+    _setConnectionState(RelayConnectionState.connecting);
     _doConnect();
   }
 
@@ -54,7 +90,6 @@ class RelayClient extends ChangeNotifier {
         onDone: _onWsDrop,
         onError: (_) => _onWsDrop(),
       );
-      // [FC1] 不在这里发 list — 等 _onWsUp 确认连接后再发
     } catch (_) {
       _scheduleReconnect();
     }
@@ -66,8 +101,21 @@ class RelayClient extends ChangeNotifier {
     _ch?.sink.close();
     _ch = null;
     _wsConnected = false;
-    _visibleConnected = false;
-    notifyListeners();
+    // 失败所有 pending 请求并取消超时 timer
+    for (final t in _pendingStartTimers.values) { t.cancel(); }
+    _pendingStartTimers.clear();
+    for (final c in _pendingStarts.values) {
+      if (!c.isCompleted) c.complete(StartResult.failure('Disconnected'));
+    }
+    _pendingStarts.clear();
+    _setConnectionState(RelayConnectionState.disconnected);
+  }
+
+  void _setConnectionState(RelayConnectionState state) {
+    if (_connectionState != state) {
+      _connectionState = state;
+      notifyListeners();
+    }
   }
 
   void _onWsUp() {
@@ -75,29 +123,29 @@ class RelayClient extends ChangeNotifier {
     _wsConnected = true;
     _retries = 0;
     _startHeartbeat();
-
-    // [FC1] 连接确认后才发 list 同步状态
     _send({'t': 'list'});
-
     _disconnectDebounce?.cancel();
-    if (!_visibleConnected) {
-      _visibleConnected = true;
-      notifyListeners();
-    }
+    _setConnectionState(RelayConnectionState.connected);
   }
 
-  // [FH4] 防止重复触发
   void _onWsDrop() {
     if (!_wsConnected && _ch == null) return;
     _heartbeat?.cancel();
     _ch = null;
     _wsConnected = false;
 
+    // 失败 pending 请求并取消超时 timer
+    for (final t in _pendingStartTimers.values) { t.cancel(); }
+    _pendingStartTimers.clear();
+    for (final c in _pendingStarts.values) {
+      if (!c.isCompleted) c.complete(StartResult.failure('Connection lost'));
+    }
+    _pendingStarts.clear();
+
     _disconnectDebounce?.cancel();
     _disconnectDebounce = Timer(const Duration(seconds: 5), () {
       if (!_wsConnected) {
-        _visibleConnected = false;
-        notifyListeners();
+        _setConnectionState(RelayConnectionState.reconnecting);
       }
     });
 
@@ -110,7 +158,12 @@ class RelayClient extends ChangeNotifier {
     final delay = Duration(milliseconds: (500 * (1 << capped)).clamp(500, 8000));
     _retries++;
     _reconnect = Timer(delay, () {
-      if (!_wsConnected && _url.isNotEmpty) _doConnect();
+      if (!_wsConnected && _url.isNotEmpty) {
+        if (_connectionState == RelayConnectionState.disconnected) {
+          _setConnectionState(RelayConnectionState.reconnecting);
+        }
+        _doConnect();
+      }
     });
   }
 
@@ -128,19 +181,29 @@ class RelayClient extends ChangeNotifier {
     try {
       _ch!.sink.add(jsonEncode(msg));
     } catch (e) {
-      debugPrint('Send failed: $e'); // [FM8] 不再静默吞异常
+      debugPrint('Send failed: $e');
     }
   }
 
-  void startSession({
+  /// 启动 session，返回 Future 等待服务端确认
+  Future<StartResult> startSession({
     required String agent,
     required String prompt,
     required String workDir,
     required bool yolo,
     String? customCmd,
   }) {
+    if (!connected) {
+      return Future.value(StartResult.failure('Not connected'));
+    }
+
+    final reqId = _generateReqId();
+    final completer = Completer<StartResult>();
+    _pendingStarts[reqId] = completer;
+
     _send({
       't': 'start',
+      'reqId': reqId,
       'c': {
         'agent': agent,
         'prompt': prompt,
@@ -148,7 +211,20 @@ class RelayClient extends ChangeNotifier {
         'yolo': yolo,
         if (customCmd != null && customCmd.isNotEmpty) 'customCmd': customCmd,
       },
+      'source': 'app',
+      'clientId': _clientId,
     });
+
+    // 15s 超时（存储 timer 以便 disconnect 时取消）
+    _pendingStartTimers[reqId] = Timer(const Duration(seconds: 15), () {
+      _pendingStartTimers.remove(reqId);
+      if (!completer.isCompleted) {
+        _pendingStarts.remove(reqId);
+        completer.complete(StartResult.failure('Request timed out'));
+      }
+    });
+
+    return completer.future;
   }
 
   void sendInput(String sid, String data) =>
@@ -172,7 +248,6 @@ class RelayClient extends ChangeNotifier {
   void stopSession(String sid) => _send({'t': 'stop', 'sid': sid});
   void refresh() => _send({'t': 'list'});
 
-  // [FM14] 清除时 dispose Terminal
   void clearEnded(String sid) {
     endedIds.remove(sid);
     terminals.remove(sid);
@@ -183,7 +258,7 @@ class RelayClient extends ChangeNotifier {
   Terminal terminalFor(String sid) =>
       terminals.putIfAbsent(sid, () => Terminal(maxLines: 10000));
 
-  // ── Session 持久化 [FM6] 用 JSON 替代 pipe 分隔 ───────
+  // ── Session 持久化 ───────────────────────────────────
 
   Future<void> saveSessionsLocally() async {
     try {
@@ -195,6 +270,7 @@ class RelayClient extends ChangeNotifier {
                 'workDir': s.workDir,
                 'yolo': s.yolo,
                 'startedAt': s.startedAt,
+                'source': s.source,
               }))
           .toList();
       await prefs.setStringList(_sessionStorageKey, data);
@@ -219,6 +295,7 @@ class RelayClient extends ChangeNotifier {
               yolo: j['yolo'] as bool? ?? false,
               status: 'running',
               startedAt: j['startedAt'] as int? ?? 0,
+              source: j['source'] as String? ?? 'app',
             );
             terminalFor(id);
           }
@@ -229,8 +306,6 @@ class RelayClient extends ChangeNotifier {
       debugPrint('Load sessions failed: $e');
     }
   }
-
-  // ── 辅助：限制 endedIds + terminals [FH3] ─────────────
 
   void _capEndedHistory() {
     while (endedIds.length > _maxEndedHistory) {
@@ -251,20 +326,38 @@ class RelayClient extends ChangeNotifier {
       if (t == null) return;
 
       switch (t) {
+        case 'start_ack':
+          final reqId = msg['reqId'] as String?;
+          if (reqId == null) break;
+          _pendingStartTimers.remove(reqId)?.cancel();
+          final completer = _pendingStarts.remove(reqId);
+          if (completer == null || completer.isCompleted) break;
+          if (msg['result'] == 'ok') {
+            final sessionData = msg['session'] as Map<String, dynamic>?;
+            if (sessionData != null) {
+              final info = SessionInfo.fromJson(sessionData);
+              sessions[info.id] = info;
+              terminalFor(info.id);
+              completer.complete(StartResult.success(info));
+              saveSessionsLocally();
+            } else {
+              completer.complete(StartResult.failure('Invalid server response'));
+            }
+          } else {
+            completer.complete(
+                StartResult.failure(msg['msg'] as String? ?? 'Unknown error'));
+          }
+          break;
+
         case 'started':
-          final sid = msg['sid'] as String? ?? '';
-          if (sid.isEmpty) break;
-          sessions[sid] = SessionInfo(
-            id: sid,
-            agent: msg['agent'] as String? ?? 'unknown',
-            workDir: msg['workDir'] as String? ?? '',
-            yolo: false,
-            status: 'running',
-            startedAt: DateTime.now().millisecondsSinceEpoch,
-          );
-          terminalFor(sid);
-          onSessionStarted?.call(sid);
-          saveSessionsLocally();
+          // 更新 session 列表（所有客户端），不自动跳转
+          final sessionData = msg['session'] as Map<String, dynamic>?;
+          if (sessionData != null) {
+            final info = SessionInfo.fromJson(sessionData);
+            sessions[info.id] = info;
+            terminalFor(info.id);
+            saveSessionsLocally();
+          }
           break;
 
         case 'data':
@@ -285,7 +378,6 @@ class RelayClient extends ChangeNotifier {
             tool: msg['tool'] as String? ?? 'tool',
             description: msg['desc'] as String? ?? '',
           );
-
           break;
 
         case 'ended':
@@ -293,7 +385,7 @@ class RelayClient extends ChangeNotifier {
           if (sid.isEmpty) break;
           sessions.remove(sid);
           approvals.remove(sid);
-          if (terminals.containsKey(sid) && !endedIds.contains(sid)) { // [F1] 防重复
+          if (terminals.containsKey(sid) && !endedIds.contains(sid)) {
             endedIds.add(sid);
             _capEndedHistory();
           }
@@ -303,6 +395,12 @@ class RelayClient extends ChangeNotifier {
         case 'list':
           final list = msg['sessions'];
           if (list is! List) break;
+          // 提取服务端配置
+          final config = msg['config'] as Map<String, dynamic>?;
+          if (config != null) {
+            _serverDefaultWorkDir =
+                config['defaultWorkDir'] as String? ?? '';
+          }
           final serverIds = <String>{};
           for (final s in list) {
             if (s is! Map<String, dynamic>) continue;
@@ -318,12 +416,12 @@ class RelayClient extends ChangeNotifier {
               .toList();
           for (final id in removedIds) {
             sessions.remove(id);
-            approvals.remove(id); // [FM7]
+            approvals.remove(id);
             if (terminals.containsKey(id) && !endedIds.contains(id)) {
               endedIds.add(id);
             }
           }
-          _capEndedHistory(); // [FH3]
+          _capEndedHistory();
           saveSessionsLocally();
           break;
 
@@ -346,7 +444,6 @@ class RelayClient extends ChangeNotifier {
     _reconnect?.cancel();
     _disconnectDebounce?.cancel();
     disconnect();
-    // xterm 4.0 Terminal 无 dispose 方法，直接清空引用
     terminals.clear();
     super.dispose();
   }

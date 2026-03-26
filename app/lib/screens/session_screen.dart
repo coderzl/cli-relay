@@ -20,14 +20,13 @@ class _SessionScreenState extends State<SessionScreen> {
   final _inputFocus = FocusNode();
   late Terminal _terminal;
   bool _approvalSheetShown = false;
-  // [FC9+F4] 用单调计数器去重
   int? _lastApprovalSeq;
 
   @override
   void initState() {
     super.initState();
-    _terminal = context.read<RelayClient>().terminalFor(widget.sessionId);
-    // 进入页面后自动聚焦输入框
+    _terminal =
+        context.read<RelayClient>().terminalFor(widget.sessionId);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _inputFocus.requestFocus();
     });
@@ -43,12 +42,14 @@ class _SessionScreenState extends State<SessionScreen> {
   void _sendInput() {
     final text = _inputCtrl.text;
     if (text.isEmpty) return;
-    context.read<RelayClient>().sendInput(widget.sessionId, '$text\r'); // PTY: CR not LF
+    context
+        .read<RelayClient>()
+        .sendInput(widget.sessionId, '$text\r');
     _inputCtrl.clear();
   }
 
   void _showApproval(RelayClient relay) {
-    if (!mounted) return; // [FH10]
+    if (!mounted) return;
     final approval = relay.approvals[widget.sessionId];
     if (approval == null || _approvalSheetShown) return;
 
@@ -71,7 +72,6 @@ class _SessionScreenState extends State<SessionScreen> {
   }
 
   void _copyAllOutput() {
-    // xterm 4.0: 通过 buffer 获取文本
     try {
       final buffer = _terminal.buffer;
       final lines = <String>[];
@@ -100,14 +100,33 @@ class _SessionScreenState extends State<SessionScreen> {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
 
-    // [FC9] 有新审批时自动弹出（用时间戳去重，同一 tool 可多次审批）
-    if (approval != null && !_approvalSheetShown && approval.seq != _lastApprovalSeq) {
+    // 有新审批时自动弹出
+    if (approval != null &&
+        !_approvalSheetShown &&
+        approval.seq != _lastApprovalSeq) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _showApproval(relay);
       });
     }
     if (approval == null) {
       _lastApprovalSeq = null;
+    }
+
+    // 状态指示
+    final Color statusColor;
+    final String statusText;
+    if (!relay.connected) {
+      statusColor = AppTheme.orange;
+      statusText = 'Reconnecting...';
+    } else if (session?.status == 'waiting_approval') {
+      statusColor = AppTheme.orange;
+      statusText = 'Waiting approval';
+    } else if (isAlive) {
+      statusColor = AppTheme.green;
+      statusText = widget.sessionId;
+    } else {
+      statusColor = Colors.grey;
+      statusText = 'Ended';
     }
 
     return Scaffold(
@@ -119,25 +138,24 @@ class _SessionScreenState extends State<SessionScreen> {
         title: Column(
           children: [
             Text(session?.agent ?? widget.sessionId,
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                style: const TextStyle(
+                    fontSize: 16, fontWeight: FontWeight.w600)),
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
                 Container(
-                  width: 6, height: 6,
+                  width: 6,
+                  height: 6,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    color: !relay.connected
-                        ? AppTheme.orange // 断线 = 橙色（非红色，减少焦虑）
-                        : isAlive ? AppTheme.green : Colors.grey,
+                    color: statusColor,
                   ),
                 ),
                 const SizedBox(width: 6),
                 Text(
-                  !relay.connected
-                      ? 'Reconnecting...'
-                      : isAlive ? widget.sessionId : 'Ended',
-                  style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+                  statusText,
+                  style: TextStyle(
+                      fontSize: 12, color: Colors.grey.shade500),
                 ),
               ],
             ),
@@ -145,14 +163,17 @@ class _SessionScreenState extends State<SessionScreen> {
         ),
         actions: [
           IconButton(
-            icon: const Icon(CupertinoIcons.doc_on_clipboard, size: 20),
+            icon: const Icon(CupertinoIcons.doc_on_clipboard,
+                size: 20),
             tooltip: 'Copy all',
             onPressed: _copyAllOutput,
           ),
           if (approval != null)
             IconButton(
-              icon: const Icon(CupertinoIcons.shield_lefthalf_fill,
-                  size: 22, color: Color(0xFFFF9500)),
+              icon: const Icon(
+                  CupertinoIcons.shield_lefthalf_fill,
+                  size: 22,
+                  color: Color(0xFFFF9500)),
               onPressed: () => _showApproval(relay),
             ),
           if (isAlive)
@@ -168,14 +189,16 @@ class _SessionScreenState extends State<SessionScreen> {
       ),
       body: Column(
         children: [
-          // ── 终端视图 (真终端渲染) ─────────────────────
           Expanded(
             child: AbsorbPointer(
-              // 禁止终端区域的点击/触摸，输入只通过底部输入框
               child: Container(
-                color: isDark ? Colors.black : const Color(0xFF1A1A2E),
+                color: isDark
+                    ? Colors.black
+                    : const Color(0xFF1A1A2E),
                 padding: EdgeInsets.only(
-                  bottom: !isAlive ? MediaQuery.of(context).viewPadding.bottom : 0,
+                  bottom: !isAlive
+                      ? MediaQuery.of(context).viewPadding.bottom
+                      : 0,
                 ),
                 child: TerminalView(
                   _terminal,
@@ -185,32 +208,39 @@ class _SessionScreenState extends State<SessionScreen> {
                   ),
                   padding: const EdgeInsets.all(8),
                   autofocus: false,
-                  onKeyEvent: (node, key) => KeyEventResult.ignored,
+                  onKeyEvent: (node, key) =>
+                      KeyEventResult.ignored,
                 ),
               ),
             ),
           ),
-
-          // ── 底部操作栏 ────────────────────────────────
-          if (isAlive) _buildBottomBar(theme, relay, isDark),
+          if (isAlive)
+            _buildBottomBar(theme, relay, isDark),
         ],
       ),
     );
   }
 
-  Widget _buildBottomBar(ThemeData theme, RelayClient relay, bool isDark) {
+  Widget _buildBottomBar(
+      ThemeData theme, RelayClient relay, bool isDark) {
+    final hasApproval =
+        relay.approvals[widget.sessionId] != null;
+
     return Container(
-      padding: EdgeInsets.fromLTRB(
-          12, 8, 12, MediaQuery.of(context).viewPadding.bottom + 8),
+      padding: EdgeInsets.fromLTRB(12, 8, 12,
+          MediaQuery.of(context).viewPadding.bottom + 8),
       decoration: BoxDecoration(
         color: isDark ? const Color(0xFF1C1C1E) : Colors.white,
-        border: Border(top: BorderSide(color: theme.dividerTheme.color ?? theme.dividerColor)),
+        border: Border(
+            top: BorderSide(
+                color: theme.dividerTheme.color ??
+                    theme.dividerColor)),
       ),
       child: Row(
         children: [
           _QuickBtn(
             label: 'y',
-            color: AppTheme.green,
+            color: hasApproval ? AppTheme.green : AppTheme.green.withAlpha(100),
             onTap: () {
               HapticFeedback.lightImpact();
               relay.sendInput(widget.sessionId, 'y\r');
@@ -219,7 +249,7 @@ class _SessionScreenState extends State<SessionScreen> {
           const SizedBox(width: 6),
           _QuickBtn(
             label: 'n',
-            color: AppTheme.red,
+            color: hasApproval ? AppTheme.red : AppTheme.red.withAlpha(100),
             onTap: () {
               HapticFeedback.lightImpact();
               relay.sendInput(widget.sessionId, 'n\r');
@@ -231,9 +261,12 @@ class _SessionScreenState extends State<SessionScreen> {
               controller: _inputCtrl,
               focusNode: _inputFocus,
               placeholder: 'Send input...',
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 14, vertical: 10),
               decoration: BoxDecoration(
-                color: isDark ? const Color(0xFF2C2C2E) : const Color(0xFFF2F2F7),
+                color: isDark
+                    ? const Color(0xFF2C2C2E)
+                    : const Color(0xFFF2F2F7),
                 borderRadius: BorderRadius.circular(20),
               ),
               style: TextStyle(
@@ -284,7 +317,9 @@ class _QuickBtn extends StatelessWidget {
         child: Center(
           child: Text(label,
               style: TextStyle(
-                  fontSize: 14, fontWeight: FontWeight.w700, color: color)),
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  color: color)),
         ),
       ),
     );

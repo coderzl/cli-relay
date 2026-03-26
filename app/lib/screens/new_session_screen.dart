@@ -2,6 +2,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/relay_client.dart';
 import '../theme/app_theme.dart';
 
@@ -16,9 +17,37 @@ class _NewSessionScreenState extends State<NewSessionScreen> {
   final _agents = ['claude', 'codex', 'qoder', 'custom'];
   int _agentIdx = 0;
   final _promptCtrl = TextEditingController();
-  final _workDirCtrl = TextEditingController(text: '/Volumes/D/zhige');
+  final _workDirCtrl = TextEditingController();
   final _cmdCtrl = TextEditingController();
   bool _yolo = false;
+  bool _loading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadLastUsed();
+  }
+
+  Future<void> _loadLastUsed() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    final lastWorkDir = prefs.getString('last_workdir');
+    final lastAgent = prefs.getString('last_agent');
+    setState(() {
+      if (lastWorkDir != null && lastWorkDir.isNotEmpty) {
+        _workDirCtrl.text = lastWorkDir;
+      } else {
+        final relay = context.read<RelayClient>();
+        if (relay.serverDefaultWorkDir.isNotEmpty) {
+          _workDirCtrl.text = relay.serverDefaultWorkDir;
+        }
+      }
+      if (lastAgent != null) {
+        final idx = _agents.indexOf(lastAgent);
+        if (idx >= 0) _agentIdx = idx;
+      }
+    });
+  }
 
   @override
   void dispose() {
@@ -30,31 +59,72 @@ class _NewSessionScreenState extends State<NewSessionScreen> {
 
   bool get _isCustom => _agents[_agentIdx] == 'custom';
 
-  void _start() {
-    // [FM20] 校验必填字段
+  Future<void> _start() async {
     final workDir = _workDirCtrl.text.trim();
     if (workDir.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Working directory is required'), behavior: SnackBarBehavior.floating),
+        const SnackBar(
+            content: Text('Working directory is required'),
+            behavior: SnackBarBehavior.floating),
       );
       return;
     }
     if (_isCustom && _cmdCtrl.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Custom command is required'), behavior: SnackBarBehavior.floating),
+        const SnackBar(
+            content: Text('Custom command is required'),
+            behavior: SnackBarBehavior.floating),
       );
       return;
     }
 
+    final relay = context.read<RelayClient>();
+    if (!relay.connected) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('Not connected to server'),
+            behavior: SnackBarBehavior.floating),
+      );
+      return;
+    }
+
+    setState(() => _loading = true);
     HapticFeedback.mediumImpact();
-    context.read<RelayClient>().startSession(
-          agent: _agents[_agentIdx],
-          prompt: _promptCtrl.text.trim(),
-          workDir: workDir,
-          yolo: _yolo,
-          customCmd: _isCustom ? _cmdCtrl.text.trim() : null,
+
+    try {
+      final result = await relay.startSession(
+        agent: _agents[_agentIdx],
+        prompt: _promptCtrl.text.trim(),
+        workDir: workDir,
+        yolo: _yolo,
+        customCmd: _isCustom ? _cmdCtrl.text.trim() : null,
+      );
+
+      if (!mounted) return;
+
+      if (result.ok) {
+        // 记住成功的配置
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('last_workdir', workDir);
+        await prefs.setString('last_agent', _agents[_agentIdx]);
+        if (mounted) Navigator.pop(context, result.sid);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text(result.error ?? 'Failed to start session'),
+              behavior: SnackBarBehavior.floating),
         );
-    Navigator.pop(context);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content: Text('Error: $e'),
+            behavior: SnackBarBehavior.floating),
+      );
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
   }
 
   @override
@@ -66,7 +136,8 @@ class _NewSessionScreenState extends State<NewSessionScreen> {
     return Container(
       decoration: BoxDecoration(
         color: theme.scaffoldBackgroundColor,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius:
+            const BorderRadius.vertical(top: Radius.circular(20)),
       ),
       padding: EdgeInsets.fromLTRB(20, 12, 20, bottom + 20),
       child: SingleChildScrollView(
@@ -75,7 +146,8 @@ class _NewSessionScreenState extends State<NewSessionScreen> {
           children: [
             // 拖拽手柄
             Container(
-              width: 36, height: 5,
+              width: 36,
+              height: 5,
               decoration: BoxDecoration(
                 color: Colors.grey.shade400,
                 borderRadius: BorderRadius.circular(3),
@@ -84,7 +156,8 @@ class _NewSessionScreenState extends State<NewSessionScreen> {
             const SizedBox(height: 20),
 
             const Text('New Session',
-                style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
+                style: TextStyle(
+                    fontSize: 22, fontWeight: FontWeight.w700)),
             const SizedBox(height: 24),
 
             // Agent
@@ -93,16 +166,21 @@ class _NewSessionScreenState extends State<NewSessionScreen> {
               children: {
                 for (int i = 0; i < _agents.length; i++)
                   i: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 6),
                     child: Text(_agents[i],
-                        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+                        style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500)),
                   ),
               },
-              onValueChanged: (v) => setState(() => _agentIdx = v ?? 0),
+              onValueChanged: (v) {
+                if (!_loading) setState(() => _agentIdx = v ?? 0);
+              },
             ),
             const SizedBox(height: 20),
 
-            // Custom Command (仅 custom 模式)
+            // Custom Command
             AnimatedSize(
               duration: const Duration(milliseconds: 200),
               child: _isCustom
@@ -110,7 +188,8 @@ class _NewSessionScreenState extends State<NewSessionScreen> {
                       children: [
                         _field(
                           ctrl: _cmdCtrl,
-                          hint: 'Command or alias (e.g. my-claude)',
+                          hint:
+                              'Command or alias (e.g. my-claude)',
                           icon: CupertinoIcons.command,
                           isDark: isDark,
                           theme: theme,
@@ -151,31 +230,41 @@ class _NewSessionScreenState extends State<NewSessionScreen> {
               ),
               child: SwitchListTile.adaptive(
                 value: _yolo,
-                onChanged: (v) {
-                  HapticFeedback.selectionClick();
-                  setState(() => _yolo = v);
-                },
+                onChanged: _loading
+                    ? null
+                    : (v) {
+                        HapticFeedback.selectionClick();
+                        setState(() => _yolo = v);
+                      },
                 title: Row(
                   children: [
                     const Text('YOLO Mode',
-                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
+                        style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w500)),
                     if (_yolo) ...[
                       const SizedBox(width: 8),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 6, vertical: 2),
                         decoration: BoxDecoration(
                           color: AppTheme.red.withAlpha(20),
                           borderRadius: BorderRadius.circular(4),
                         ),
                         child: const Text('ON',
-                            style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppTheme.red)),
+                            style: TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.w700,
+                                color: AppTheme.red)),
                       ),
                     ],
                   ],
                 ),
-                subtitle: const Text('Auto-approve all tool calls',
+                subtitle: const Text(
+                    'Auto-approve all tool calls',
                     style: TextStyle(fontSize: 13)),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 16, vertical: 4),
                 activeColor: AppTheme.red,
               ),
             ),
@@ -187,11 +276,16 @@ class _NewSessionScreenState extends State<NewSessionScreen> {
               height: 52,
               child: CupertinoButton.filled(
                 borderRadius: BorderRadius.circular(14),
-                onPressed: _start,
-                child: Text(
-                  _yolo ? 'Start YOLO' : 'Start Session',
-                  style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
-                ),
+                onPressed: _loading ? null : _start,
+                child: _loading
+                    ? const CupertinoActivityIndicator(
+                        color: Colors.white)
+                    : Text(
+                        _yolo ? 'Start YOLO' : 'Start Session',
+                        style: const TextStyle(
+                            fontSize: 17,
+                            fontWeight: FontWeight.w600),
+                      ),
               ),
             ),
           ],
@@ -214,16 +308,19 @@ class _NewSessionScreenState extends State<NewSessionScreen> {
       placeholder: hint,
       maxLines: maxLines,
       autofocus: autofocus,
+      enabled: !_loading,
       prefix: Padding(
         padding: const EdgeInsets.only(left: 12),
         child: Icon(icon, size: 18, color: Colors.grey.shade500),
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 14),
+      padding:
+          const EdgeInsets.symmetric(horizontal: 10, vertical: 14),
       decoration: BoxDecoration(
         color: theme.cardTheme.color,
         borderRadius: BorderRadius.circular(14),
       ),
-      style: TextStyle(color: isDark ? Colors.white : Colors.black, fontSize: 15),
+      style: TextStyle(
+          color: isDark ? Colors.white : Colors.black, fontSize: 15),
     );
   }
 }

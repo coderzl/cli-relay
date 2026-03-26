@@ -1,15 +1,16 @@
 import { EventEmitter } from 'node:events'
 import { existsSync, realpathSync } from 'node:fs'
 import { randomUUID, timingSafeEqual, createHmac } from 'node:crypto'
-import { resolve } from 'node:path'
+import { resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { spawn, ChildProcess } from 'node:child_process'
 import stripAnsi from 'strip-ansi'
 import type { SessionConfig, SessionInfo, ApprovalMatch } from './types.js'
 
 const MAX_SESSIONS = 10
 const CR = '\r'
+const RESIZE_MARKER = '\x00\x00RESIZE:'
 
-// [C1+C3] Agent 白名单
 const VALID_AGENTS = ['claude', 'codex', 'qoder', 'custom'] as const
 
 // ── Agent 启动命令 ───────────────────────────────────────
@@ -17,7 +18,6 @@ const VALID_AGENTS = ['claude', 'codex', 'qoder', 'custom'] as const
 const SAFE_CMD_RE = /^[a-zA-Z0-9\-_./~ ]+$/
 
 function buildShellCmd(c: SessionConfig): string {
-  // [C1] 严格校验 agent
   if (!(VALID_AGENTS as readonly string[]).includes(c.agent)) {
     throw new Error(`Invalid agent: ${c.agent}`)
   }
@@ -54,7 +54,6 @@ function shellEscape(s: string): string {
 // ── 常量比较（防时序攻击）───────────────────────────────
 
 export function safeTokenEqual(a: string, b: string): boolean {
-  // HMAC 使长度一致，防止长度泄露
   const key = 'cli-relay-token-compare'
   const ha = createHmac('sha256', key).update(a).digest()
   const hb = createHmac('sha256', key).update(b).digest()
@@ -91,6 +90,8 @@ export interface Session {
   config: SessionConfig
   status: 'running' | 'waiting_approval'
   startedAt: number
+  source: 'app' | 'discord'
+  initiatorClientId?: string
   write(data: string): void
   writeBinary(data: Buffer): void
   resize(cols: number, rows: number): void
@@ -107,10 +108,14 @@ export class SessionManager extends EventEmitter {
 
   constructor() {
     super()
-    this.setMaxListeners(20) // [L5] app-server + discord 各注册多个 listener
+    this.setMaxListeners(20)
   }
 
-  start(config: SessionConfig): Session {
+  start(
+    config: SessionConfig,
+    source: 'app' | 'discord' = 'app',
+    initiatorClientId?: string,
+  ): Session {
     if (this.sessions.size >= MAX_SESSIONS) {
       throw new Error(`Max ${MAX_SESSIONS} concurrent sessions`)
     }
@@ -119,7 +124,7 @@ export class SessionManager extends EventEmitter {
       throw new Error(`Working directory does not exist: ${config.workDir}`)
     }
 
-    // [H5+B1] workDir 路径限制 — realpathSync 防 symlink 绕过
+    // workDir 路径限制 — 用 sep 防止前缀绕过（如 /Volumes/D/zhige-evil）
     const allowedBase = realpathSync(resolve(process.env.WORK_DIR ?? process.env.HOME ?? '/'))
     let resolvedDir: string
     try {
@@ -127,20 +132,22 @@ export class SessionManager extends EventEmitter {
     } catch {
       throw new Error(`workDir not accessible: ${config.workDir}`)
     }
-    if (!resolvedDir.startsWith(allowedBase) && resolvedDir !== allowedBase) {
+    const allowedBaseWithSep = allowedBase.endsWith(sep) ? allowedBase : allowedBase + sep
+    if (resolvedDir !== allowedBase && !resolvedDir.startsWith(allowedBaseWithSep)) {
       throw new Error(`workDir must be under ${allowedBase}, got: ${resolvedDir}`)
     }
 
-    // [H1] 防碰撞 ID
+    // 防碰撞 ID
     let id: string
     do { id = randomUUID().slice(0, 12) } while (this.sessions.has(id))
 
     const shellCmd = buildShellCmd(config)
     const startedAt = Date.now()
 
-    console.log(`[session] Starting: ${shellCmd.slice(0, 80)}...`)
+    console.log(`[session] Starting [${source}${initiatorClientId ? `:${initiatorClientId.slice(0, 8)}` : ''}]: ${shellCmd.slice(0, 80)}...`)
 
-    const bridgePath = new URL('../pty-bridge.py', import.meta.url).pathname
+    // fileURLToPath 正确处理含空格/中文的路径
+    const bridgePath = fileURLToPath(new URL('../pty-bridge.py', import.meta.url))
     const proc = spawn('python3', [bridgePath, '120', '40', 'zsh', '-ilc', shellCmd], {
       cwd: config.workDir,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -156,7 +163,7 @@ export class SessionManager extends EventEmitter {
       throw new Error('Failed to spawn process')
     }
 
-    console.log(`[session] ${id} spawned (PID: ${proc.pid})`)
+    console.log(`[session] ${id} spawned (PID: ${proc.pid}, source: ${source})`)
 
     // ── Raw 流: 低延迟 50ms flush → App
     let rawBuf = Buffer.alloc(0)
@@ -173,6 +180,7 @@ export class SessionManager extends EventEmitter {
     // ── Processed 流: 1s 聚合 → Discord
     let textBuf = ''
     let textTimer: ReturnType<typeof setTimeout> | null = null
+    let lastApprovalHash = ''
 
     const flushText = () => {
       textTimer = null
@@ -190,8 +198,13 @@ export class SessionManager extends EventEmitter {
       if (!config.yolo) {
         const m = detectApproval(clean)
         if (m) {
-          session.status = 'waiting_approval'
-          this.emit('approval', id, m)
+          // 用 description hash 防重复触发同一审批
+          const hash = m.description.slice(0, 100)
+          if (hash !== lastApprovalHash) {
+            lastApprovalHash = hash
+            session.status = 'waiting_approval'
+            this.emit('approval', id, m)
+          }
         }
       }
 
@@ -208,7 +221,6 @@ export class SessionManager extends EventEmitter {
     let allOutputClean = ''
     const TRUST_RE = /trust[\s\S]*directory|Yes,?\s*I?\s*trust|Enter\s*to\s*confirm|Entertoconfirm|Press\s*enter\s*to\s*continue/i
 
-    // [H4] 防止 error + exit 双重触发
     let ended = false
 
     const onData = (data: Buffer) => {
@@ -216,13 +228,12 @@ export class SessionManager extends EventEmitter {
       if (!trustConfirmed) {
         const chunk = stripAnsi(data.toString('utf-8'))
         allOutputClean += chunk
-        // [H2] 限制 buffer 大小
         if (allOutputClean.length > 10000) {
           allOutputClean = allOutputClean.slice(-5000)
         }
         if (TRUST_RE.test(allOutputClean)) {
           trustConfirmed = true
-          allOutputClean = '' // 释放内存
+          allOutputClean = ''
           console.log(`[session] ${id} auto-confirming trust`)
           setTimeout(() => proc.stdin?.write(CR), 500)
         }
@@ -250,12 +261,12 @@ export class SessionManager extends EventEmitter {
     proc.stdout?.on('data', onData)
     proc.stderr?.on('data', onData)
 
-    // [H4] 统一退出处理
+    // 统一退出处理
     const onEnd = (code: number) => {
       if (ended) return
       ended = true
       clearTimers()
-      flushRaw()   // [H6] error 路径也 flush
+      flushRaw()
       flushText()
       this.emit('ended', id, code)
       this.sessions.delete(id)
@@ -276,21 +287,33 @@ export class SessionManager extends EventEmitter {
       config,
       status: 'running',
       startedAt,
+      source,
+      initiatorClientId,
       proc,
       write: (d) => proc.stdin?.write(d),
       writeBinary: (d) => proc.stdin?.write(d),
-      resize: () => {},
+      resize(cols: number, rows: number) {
+        if (cols > 0 && cols <= 1000 && rows > 0 && rows <= 1000) {
+          proc.stdin?.write(`${RESIZE_MARKER}${cols},${rows}\n`)
+        }
+      },
       approve() {
         proc.stdin?.write('y' + CR)
         this.status = 'running'
+        lastApprovalHash = ''
       },
       deny() {
         proc.stdin?.write('n' + CR)
         this.status = 'running'
+        lastApprovalHash = ''
       },
       kill() {
         clearTimers()
         proc.kill('SIGTERM')
+        // 超时强杀
+        setTimeout(() => {
+          try { proc.kill('SIGKILL') } catch {}
+        }, 3000)
       },
       info: () => ({
         id,
@@ -299,6 +322,8 @@ export class SessionManager extends EventEmitter {
         yolo: config.yolo,
         status: session.status,
         startedAt,
+        source,
+        initiatorClientId,
       }),
     }
 

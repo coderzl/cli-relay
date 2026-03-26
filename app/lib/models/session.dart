@@ -5,6 +5,9 @@ class SessionInfo {
   final bool yolo;
   final String status;
   final int startedAt;
+  final String source;
+  final String? initiatorClientId;
+  final int? exitCode;
 
   SessionInfo({
     required this.id,
@@ -13,6 +16,9 @@ class SessionInfo {
     required this.yolo,
     required this.status,
     required this.startedAt,
+    this.source = 'app',
+    this.initiatorClientId,
+    this.exitCode,
   });
 
   factory SessionInfo.fromJson(Map<String, dynamic> j) => SessionInfo(
@@ -22,6 +28,9 @@ class SessionInfo {
         yolo: j['yolo'] as bool? ?? false,
         status: j['status'] as String? ?? 'running',
         startedAt: j['startedAt'] as int? ?? 0,
+        source: j['source'] as String? ?? 'app',
+        initiatorClientId: j['initiatorClientId'] as String?,
+        exitCode: j['exitCode'] as int?,
       );
 
   String get duration {
@@ -33,7 +42,6 @@ class SessionInfo {
 }
 
 class ApprovalRequest {
-  // [F4] 单调递增计数器，不依赖时钟精度
   static int _counter = 0;
   final int seq;
   final String sessionId;
@@ -45,4 +53,21 @@ class ApprovalRequest {
     required this.tool,
     required this.description,
   }) : seq = ++_counter;
+}
+
+class StartResult {
+  final bool ok;
+  final String? sid;
+  final SessionInfo? session;
+  final String? error;
+
+  StartResult.success(SessionInfo this.session)
+      : ok = true,
+        sid = session.id,
+        error = null;
+
+  StartResult.failure(this.error)
+      : ok = false,
+        sid = null,
+        session = null;
 }

@@ -5,9 +5,8 @@ export interface SessionConfig {
   prompt: string
   workDir: string
   yolo: boolean
-  /** 自定义启动命令，如 zsh alias 或脚本路径。
-   *  设置后忽略 agent 字段，直接用此命令启动。
-   *  示例: "my-claude" (alias), "/path/to/run.sh", "zsh -ic 'my-alias'" */
+  /** 自定义启动命令（仅 agent=custom 时使用）。
+   *  必须匹配 SAFE_CMD_RE，禁止 shell 注入。 */
   customCmd?: string
 }
 
@@ -16,15 +15,18 @@ export interface SessionInfo {
   agent: string
   workDir: string
   yolo: boolean
-  status: 'running' | 'waiting_approval'
+  status: 'starting' | 'running' | 'waiting_approval' | 'ended' | 'failed'
   startedAt: number
+  source: 'app' | 'discord'
+  initiatorClientId?: string
+  exitCode?: number | null
 }
 
-// ── App WS 协议（原始终端流）─────────────────────────────
+// ── App WS 协议 ─────────────────────────────────────────
 
 export type AppClientMsg =
-  | { t: 'start'; c: SessionConfig }
-  | { t: 'input'; sid: string; d: string }     // raw stdin
+  | { t: 'start'; reqId: string; c: SessionConfig; source?: 'app'; clientId?: string }
+  | { t: 'input'; sid: string; d: string }
   | { t: 'resize'; sid: string; cols: number; rows: number }
   | { t: 'approve'; sid: string }
   | { t: 'deny'; sid: string }
@@ -32,11 +34,13 @@ export type AppClientMsg =
   | { t: 'list' }
 
 export type AppServerMsg =
-  | { t: 'started'; sid: string; agent: string; workDir: string }
-  | { t: 'data'; sid: string; d: string }       // raw PTY output (base64)
+  | { t: 'start_ack'; reqId: string; result: 'ok'; session: SessionInfo }
+  | { t: 'start_ack'; reqId: string; result: 'error'; msg: string }
+  | { t: 'started'; sid: string; session: SessionInfo }
+  | { t: 'data'; sid: string; d: string }
   | { t: 'approval'; sid: string; tool: string; desc: string }
   | { t: 'ended'; sid: string; code: number }
-  | { t: 'list'; sessions: SessionInfo[] }
+  | { t: 'list'; sessions: SessionInfo[]; config?: { defaultWorkDir: string } }
   | { t: 'error'; msg: string }
 
 // ── 审批检测结果 ─────────────────────────────────────────

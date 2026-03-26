@@ -10,7 +10,6 @@ import 'screens/home_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // [FM24] 不硬编码 statusbar 颜色，让主题控制
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
   ));
@@ -20,7 +19,11 @@ void main() async {
   runApp(
     MultiProvider(
       providers: [
-        ChangeNotifierProvider(create: (_) => RelayClient()),
+        ChangeNotifierProvider(create: (_) {
+          final client = RelayClient();
+          client.initWithPrefs(prefs);
+          return client;
+        }),
         ChangeNotifierProvider(create: (_) => ThemeService(prefs)),
       ],
       child: const CliRelayApp(),

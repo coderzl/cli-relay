@@ -16,7 +16,7 @@ import {
   ThreadChannel,
 } from 'discord.js'
 import { SessionManager } from './core/session.js'
-import type { SessionInfo, ApprovalMatch } from './core/types.js'
+import type { SessionConfig, SessionInfo, ApprovalMatch } from './core/types.js'
 
 // ── 颜色常量 (iOS palette) ──────────────────────────────
 
@@ -42,51 +42,7 @@ function detectLang(text: string): string {
   return ''
 }
 
-function isCodeBlock(text: string): boolean {
-  const lines = text.split('\n')
-  const codeLines = lines.filter(
-    (l) => /^\s{2,}/.test(l) || /[{}();\[\]=><]/.test(l) || /^\s*(\/\/|#|--|\/\*)/.test(l)
-  )
-  return codeLines.length > lines.length * 0.4
-}
-
-// ── 输出格式化 ───────────────────────────────────────────
-
-const MAX_EMBED = 4000
-const MAX_FIELD = 1024
-
-function formatOutput(text: string): EmbedBuilder[] {
-  const embeds: EmbedBuilder[] = []
-
-  // 短输出: 单个 embed
-  if (text.length <= MAX_EMBED) {
-    const lang = isCodeBlock(text) ? detectLang(text) : ''
-    const content = lang
-      ? `\`\`\`${lang}\n${text}\n\`\`\``
-      : `\`\`\`\n${text}\n\`\`\``
-
-    embeds.push(
-      new EmbedBuilder()
-        .setColor(C.green)
-        .setDescription(content.slice(0, MAX_EMBED))
-    )
-    return embeds
-  }
-
-  // 长输出: 拆分为多个 embed
-  const chunks = smartChunk(text, MAX_EMBED - 20)
-  for (let i = 0; i < chunks.length; i++) {
-    const lang = isCodeBlock(chunks[i]) ? detectLang(chunks[i]) : ''
-    const embed = new EmbedBuilder()
-      .setColor(C.green)
-      .setDescription(`\`\`\`${lang}\n${chunks[i]}\n\`\`\``)
-    if (chunks.length > 1) {
-      embed.setFooter({ text: `Part ${i + 1}/${chunks.length}` })
-    }
-    embeds.push(embed)
-  }
-  return embeds
-}
+// ── 输出智能分块 ────────────────────────────────────────
 
 function smartChunk(text: string, max: number): string[] {
   const parts: string[] = []
@@ -96,7 +52,6 @@ function smartChunk(text: string, max: number): string[] {
     if (cut < max * 0.3) cut = text.lastIndexOf('\n', max)
     if (cut <= 0) cut = max
     parts.push(text.slice(0, cut))
-    // [M5] 修复 off-by-one：换行符在 cut 位置时跳过，否则从 cut 开始
     text = text[cut] === '\n' ? text.slice(cut + 1) : text.slice(cut)
   }
   return parts
@@ -149,7 +104,6 @@ function approvalRow(sid: string) {
 }
 
 // ── 消息编辑管理器 ───────────────────────────────────────
-// 不断编辑同一条消息直到满，减少消息刷屏
 
 class MessageEditor {
   private current: Message | null = null
@@ -164,10 +118,9 @@ class MessageEditor {
   }
 
   async append(text: string, sid: string) {
-    // 累积待发文本
     this.pendingText += (this.pendingText ? '\n' : '') + text
 
-    if (this.sending) return // 正在发送中，等下一轮
+    if (this.sending) return
     this.sending = true
 
     while (this.pendingText) {
@@ -182,28 +135,24 @@ class MessageEditor {
         const formatted = `\`\`\`${lang}\n${newContent}\n\`\`\``
 
         if (formatted.length < 1900 && this.current) {
-          // 编辑现有消息
           this.content = newContent
           await this.current.edit({
             content: formatted,
             components: [approvalRow(sid)],
           })
         } else if (formatted.length < 1900 && !this.current) {
-          // 创建新消息
           this.content = newContent
           this.current = await this.thread.send({
             content: formatted,
             components: [approvalRow(sid)],
           })
         } else {
-          // 消息满了，finalize 当前消息并开新消息
           this.current = null
           this.content = toSend
           const newLang = detectLang(toSend)
           const newFormatted = `\`\`\`${newLang}\n${toSend}\n\`\`\``
 
           if (newFormatted.length > 1900) {
-            // 超长单块: 发文件附件
             const file = new AttachmentBuilder(
               Buffer.from(toSend, 'utf-8'),
               { name: 'output.txt' }
@@ -234,7 +183,7 @@ class MessageEditor {
     this.current = null
     this.content = ''
     this.lang = ''
-    this.pendingText = '' // [M6] 清除待发文本
+    this.pendingText = ''
   }
 }
 
@@ -255,12 +204,11 @@ export async function startDiscordBot(sessions: SessionManager) {
     ],
   })
 
-  // sid → { threadId, editor }
   const live = new Map<string, { threadId: string; editor: MessageEditor }>()
 
-  // ── 事件: processed 输出 → Discord ──────────────────
+  // ── 事件: processed 输出 → Discord
 
-  sessions.on('processed', (sid: string, text: string, isLong: boolean) => {
+  sessions.on('processed', (sid: string, text: string) => {
     const entry = live.get(sid)
     if (!entry) return
     entry.editor.append(text, sid)
@@ -283,7 +231,6 @@ export async function startDiscordBot(sessions: SessionManager) {
       components: [approvalRow(sid)],
     }).catch(console.error)
 
-    // 新审批 → 开新消息块
     entry.editor.reset()
   })
 
@@ -302,12 +249,11 @@ export async function startDiscordBot(sessions: SessionManager) {
 
     thread.send({ embeds: [embed] }).catch(console.error)
 
-    // 更新线程名
     thread.setName(`${emoji} ${thread.name.replace(/^[🟢🔴✅❌⚡]\s*/, '')}`).catch(() => {})
     live.delete(sid)
   })
 
-  // ── 交互处理 ──────────────────────────────────────────
+  // ── 交互处理
 
   client.on('interactionCreate', async (interaction: Interaction) => {
     if (interaction.user.id !== OWNER_ID) {
@@ -321,10 +267,10 @@ export async function startDiscordBot(sessions: SessionManager) {
       const [action, sid] = interaction.customId.split(':')
       const s = sessions.get(sid)
       if (!s) {
-        await interaction.reply({ content: 'Session gone', ephemeral: true })
+        await interaction.reply({ content: 'Session already ended', ephemeral: true })
         return
       }
-      await interaction.deferUpdate() // [M1] 先 defer，再执行动作
+      await interaction.deferUpdate()
       if (action === 'approve') s.approve()
       else if (action === 'deny') s.deny()
       else if (action === 'stop') s.kill()
@@ -347,8 +293,9 @@ export async function startDiscordBot(sessions: SessionManager) {
           list
             .map((s) => {
               const yTag = s.yolo ? ' `YOLO`' : ''
+              const src = s.source === 'discord' ? '🎮' : '📱'
               const dur = Math.round((Date.now() - s.startedAt) / 1000)
-              return `**${s.agent}** \`${s.id}\`${yTag} — \`${s.workDir}\` — ${dur}s`
+              return `${src} **${s.agent}** \`${s.id}\`${yTag} — \`${s.workDir}\` — ${dur}s`
             })
             .join('\n')
         )
@@ -365,22 +312,28 @@ export async function startDiscordBot(sessions: SessionManager) {
       return
     }
 
-    // /run
+    // /run — 先启动成功，再建 thread
     if (interaction.commandName === 'run') {
-      const agent = interaction.options.getString('agent', true) as any
+      const agent = interaction.options.getString('agent', true) as SessionConfig['agent']
       const prompt = interaction.options.getString('prompt', true)
       const workDir = interaction.options.getString('workdir') ?? process.env.WORK_DIR ?? process.env.HOME!
       const yolo = interaction.options.getBoolean('yolo') ?? false
       const customCmd = interaction.options.getString('cmd') ?? undefined
 
+      await interaction.deferReply()
+
+      // 先尝试启动 session
+      let session: ReturnType<typeof sessions.start>
+      try {
+        session = sessions.start({ agent, prompt, workDir, yolo, customCmd }, 'discord')
+      } catch (e) {
+        await interaction.editReply({ content: `❌ Failed: ${(e as Error).message}` })
+        return
+      }
+
+      // 启动成功，创建 thread
       const yTag = yolo ? ' `YOLO`' : ''
       const cmdTag = customCmd ? ` via \`${customCmd}\`` : ''
-
-      const startEmbed = new EmbedBuilder()
-        .setColor(C.purple)
-        .setDescription(`⚡ Starting **${agent}**${yTag}${cmdTag}\n📂 \`${workDir}\``)
-
-      await interaction.reply({ embeds: [startEmbed] })
 
       const channel = interaction.channel as TextChannel
       const thread = await channel.threads.create({
@@ -389,14 +342,17 @@ export async function startDiscordBot(sessions: SessionManager) {
       })
 
       const editor = new MessageEditor(thread)
-      let session: ReturnType<typeof sessions.start>
-      try {
-        session = sessions.start({ agent, prompt, workDir, yolo, customCmd })
-      } catch (e) {
-        await thread.send(`Error: ${(e as Error).message}`)
-        return
-      }
       live.set(session.id, { threadId: thread.id, editor })
+
+      await interaction.editReply({
+        embeds: [new EmbedBuilder()
+          .setColor(C.purple)
+          .setDescription(
+            `⚡ Started **${agent}**${yTag}${cmdTag}\n` +
+            `📂 \`${workDir}\`\n🔗 Session \`${session.id}\``
+          )
+        ],
+      })
 
       const infoEmbed = new EmbedBuilder()
         .setColor(C.blue)
@@ -416,17 +372,17 @@ export async function startDiscordBot(sessions: SessionManager) {
   // 线程文字 → stdin
   client.on('messageCreate', (msg) => {
     if (msg.author.bot || msg.author.id !== OWNER_ID) return
+    if (!msg.content.trim()) return // 过滤空消息
     for (const [sid, entry] of live) {
       if (entry.threadId === msg.channelId) {
-        sessions.get(sid)?.write(msg.content + '\r') // PTY raw mode 需要 CR
-        // 新输入后 → 开新消息块
+        sessions.get(sid)?.write(msg.content + '\r')
         entry.editor.reset()
         break
       }
     }
   })
 
-  // ── 注册 & 登录 ──────────────────────────────────────
+  // ── 注册 & 登录
 
   const rest = new REST().setToken(DISCORD_TOKEN)
   await rest.put(Routes.applicationCommands(DISCORD_APP_ID), { body: slashCommands() })

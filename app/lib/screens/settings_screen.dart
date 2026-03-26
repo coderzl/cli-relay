@@ -27,18 +27,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _load() async {
     final p = await SharedPreferences.getInstance();
     if (!mounted) return;
-    _urlCtrl.text = p.getString('server_url') ?? 'ws://100.x.x.x:3001';
+    _urlCtrl.text = p.getString('server_url') ?? '';
     _tokenCtrl.text = p.getString('auth_token') ?? '';
   }
 
   Future<void> _save() async {
-    final p = await SharedPreferences.getInstance();
-    await p.setString('server_url', _urlCtrl.text.trim());
-    await p.setString('auth_token', _tokenCtrl.text.trim());
-    if (mounted) {
-      context.read<RelayClient>().connect(_urlCtrl.text.trim(), _tokenCtrl.text.trim());
+    final url = _urlCtrl.text.trim();
+    final token = _tokenCtrl.text.trim();
+    if (url.isEmpty || token.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Saved & connecting...'), behavior: SnackBarBehavior.floating),
+        const SnackBar(
+            content: Text('URL and token are required'),
+            behavior: SnackBarBehavior.floating),
+      );
+      return;
+    }
+
+    final p = await SharedPreferences.getInstance();
+    await p.setString('server_url', url);
+    await p.setString('auth_token', token);
+    if (mounted) {
+      context.read<RelayClient>().connect(url, token);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('Saved & connecting...'),
+            behavior: SnackBarBehavior.floating),
       );
     }
   }
@@ -56,6 +69,38 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final themeSvc = context.watch<ThemeService>();
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
+
+    // 连接状态
+    final connState = relay.connectionState;
+    final connIcon = switch (connState) {
+      RelayConnectionState.connected =>
+        CupertinoIcons.checkmark_circle_fill,
+      RelayConnectionState.connecting ||
+      RelayConnectionState.reconnecting =>
+        CupertinoIcons.arrow_2_circlepath,
+      RelayConnectionState.disconnected =>
+        CupertinoIcons.xmark_circle_fill,
+    };
+    final connColor = switch (connState) {
+      RelayConnectionState.connected => AppTheme.green,
+      RelayConnectionState.connecting ||
+      RelayConnectionState.reconnecting =>
+        AppTheme.orange,
+      RelayConnectionState.disconnected => AppTheme.red,
+    };
+    final connLabel = switch (connState) {
+      RelayConnectionState.connected => 'Connected',
+      RelayConnectionState.connecting => 'Connecting...',
+      RelayConnectionState.reconnecting => 'Reconnecting...',
+      RelayConnectionState.disconnected => 'Disconnected',
+    };
+    final connSub = switch (connState) {
+      RelayConnectionState.connected => 'WebSocket active',
+      RelayConnectionState.connecting ||
+      RelayConnectionState.reconnecting =>
+        'Please wait...',
+      RelayConnectionState.disconnected => 'Configure below',
+    };
 
     return Scaffold(
       appBar: AppBar(
@@ -77,28 +122,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 const AppLogo(size: 64),
                 const SizedBox(height: 12),
                 Text('CLI Relay',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700,
+                    style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
                         color: theme.colorScheme.onSurface)),
-                Text('v1.0.0',
-                    style: TextStyle(fontSize: 13, color: Colors.grey.shade500)),
+                Text('v1.1.0',
+                    style: TextStyle(
+                        fontSize: 13,
+                        color: Colors.grey.shade500)),
               ],
             ),
           ),
           const SizedBox(height: 28),
 
-          // ── Connection ────────────────────────────────
+          // ── Connection
           _GroupCard(
             children: [
               ListTile(
-                leading: Icon(
-                  relay.connected
-                      ? CupertinoIcons.checkmark_circle_fill
-                      : CupertinoIcons.xmark_circle_fill,
-                  color: relay.connected ? AppTheme.green : AppTheme.red,
-                ),
-                title: Text(relay.connected ? 'Connected' : 'Disconnected'),
-                subtitle: Text(relay.connected ? 'WebSocket active' : 'Configure below',
-                    style: TextStyle(fontSize: 13, color: Colors.grey.shade500)),
+                leading: Icon(connIcon, color: connColor),
+                title: Text(connLabel),
+                subtitle: Text(connSub,
+                    style: TextStyle(
+                        fontSize: 13,
+                        color: Colors.grey.shade500)),
               ),
             ],
           ),
@@ -109,12 +155,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
             children: [
               _inputTile(
                 ctrl: _urlCtrl,
-                hint: 'ws://100.x.x.x:3001',
+                hint: 'wss://your-tunnel-url.trycloudflare.com',
                 icon: CupertinoIcons.link,
                 isDark: isDark,
                 theme: theme,
               ),
-              Divider(height: 0.5, indent: 52, color: theme.dividerTheme.color),
+              Divider(
+                  height: 0.5,
+                  indent: 52,
+                  color: theme.dividerTheme.color),
               _inputTile(
                 ctrl: _tokenCtrl,
                 hint: 'Auth Token',
@@ -128,11 +177,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 child: SizedBox(
                   width: double.infinity,
                   child: CupertinoButton.filled(
-                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    padding: const EdgeInsets.symmetric(
+                        vertical: 12),
                     borderRadius: BorderRadius.circular(10),
                     onPressed: _save,
                     child: const Text('Save & Connect',
-                        style: TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
+                        style: TextStyle(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 15)),
                   ),
                 ),
               ),
@@ -140,27 +192,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           const SizedBox(height: 20),
 
-          // ── Appearance ────────────────────────────────
+          // ── Appearance
           _section('APPEARANCE'),
           _GroupCard(
             children: [
               ListTile(
-                leading: Icon(themeSvc.icon, color: theme.colorScheme.primary),
+                leading: Icon(themeSvc.icon,
+                    color: theme.colorScheme.primary),
                 title: const Text('Theme'),
-                trailing: CupertinoSlidingSegmentedControl<ThemeMode>(
+                trailing:
+                    CupertinoSlidingSegmentedControl<ThemeMode>(
                   groupValue: themeSvc.themeMode,
                   children: const {
                     ThemeMode.system: Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 4),
-                      child: Text('Auto', style: TextStyle(fontSize: 13)),
+                      padding:
+                          EdgeInsets.symmetric(horizontal: 4),
+                      child: Text('Auto',
+                          style: TextStyle(fontSize: 13)),
                     ),
                     ThemeMode.light: Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 4),
-                      child: Text('Light', style: TextStyle(fontSize: 13)),
+                      padding:
+                          EdgeInsets.symmetric(horizontal: 4),
+                      child: Text('Light',
+                          style: TextStyle(fontSize: 13)),
                     ),
                     ThemeMode.dark: Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 4),
-                      child: Text('Dark', style: TextStyle(fontSize: 13)),
+                      padding:
+                          EdgeInsets.symmetric(horizontal: 4),
+                      child: Text('Dark',
+                          style: TextStyle(fontSize: 13)),
                     ),
                   },
                   onValueChanged: (v) {
@@ -175,11 +235,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _section('INFO'),
           _GroupCard(
             children: [
-              _infoTile(CupertinoIcons.shield, 'Use Tailscale for secure remote access'),
-              Divider(height: 0.5, indent: 52, color: theme.dividerTheme.color),
-              _infoTile(CupertinoIcons.arrow_2_circlepath, 'Auto-reconnects on disconnect'),
-              Divider(height: 0.5, indent: 52, color: theme.dividerTheme.color),
-              _infoTile(Icons.terminal, 'Supports zsh alias & custom commands'),
+              _infoTile(CupertinoIcons.globe,
+                  'Use Cloudflare Tunnel for remote access'),
+              Divider(
+                  height: 0.5,
+                  indent: 52,
+                  color: theme.dividerTheme.color),
+              _infoTile(CupertinoIcons.arrow_2_circlepath,
+                  'Auto-reconnects on disconnect'),
+              Divider(
+                  height: 0.5,
+                  indent: 52,
+                  color: theme.dividerTheme.color),
+              _infoTile(Icons.terminal,
+                  'Supports zsh alias & custom commands'),
             ],
           ),
           const SizedBox(height: 40),
@@ -191,8 +260,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _section(String t) => Padding(
         padding: const EdgeInsets.only(left: 16, bottom: 8),
         child: Text(t,
-            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
-                color: Colors.grey.shade500, letterSpacing: 0.5)),
+            style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: Colors.grey.shade500,
+                letterSpacing: 0.5)),
       );
 
   Widget _inputTile({
@@ -211,22 +283,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
         obscureText: obscure,
         prefix: Padding(
           padding: const EdgeInsets.only(left: 8),
-          child: Icon(icon, size: 18, color: Colors.grey.shade500),
+          child: Icon(icon,
+              size: 18, color: Colors.grey.shade500),
         ),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+        padding: const EdgeInsets.symmetric(
+            horizontal: 10, vertical: 12),
         decoration: BoxDecoration(
           color: theme.scaffoldBackgroundColor,
           borderRadius: BorderRadius.circular(10),
         ),
-        style: TextStyle(color: isDark ? Colors.white : Colors.black),
+        style: TextStyle(
+            color: isDark ? Colors.white : Colors.black),
       ),
     );
   }
 
   Widget _infoTile(IconData icon, String text) => ListTile(
         dense: true,
-        leading: Icon(icon, size: 18, color: Colors.grey.shade500),
-        title: Text(text, style: TextStyle(fontSize: 14, color: Colors.grey.shade600)),
+        leading:
+            Icon(icon, size: 18, color: Colors.grey.shade500),
+        title: Text(text,
+            style: TextStyle(
+                fontSize: 14,
+                color: Colors.grey.shade600)),
       );
 }
 
@@ -242,7 +321,8 @@ class _GroupCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(14),
       ),
       clipBehavior: Clip.antiAlias,
-      child: Column(mainAxisSize: MainAxisSize.min, children: children),
+      child: Column(
+          mainAxisSize: MainAxisSize.min, children: children),
     );
   }
 }
