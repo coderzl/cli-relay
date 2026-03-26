@@ -6,7 +6,7 @@ workflows:
     working_directory: app
 
     environment:
-      flutter: stable
+      flutter: 3.24.5
       java: 17
 
     scripts:

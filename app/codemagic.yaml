@@ -5,7 +5,7 @@ workflows:
     instance_type: mac_mini_m2
 
     environment:
-      flutter: stable
+      flutter: 3.24.5
       java: 17
 
     scripts:
